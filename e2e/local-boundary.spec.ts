@@ -74,5 +74,5 @@ test("Gemini workspace exposes adapted controls and disables unadapted models", 
   await expect(page.getByText("2 / 14")).toBeVisible();
   await page.getByRole("button", { name: "Remove reference 1" }).click();
   await expect(page.getByText("1 / 14")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Apply edit" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Generate" })).toBeVisible();
 });

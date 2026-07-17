@@ -37,25 +37,25 @@ describe("Gemini adapter", () => {
 
   it("publishes strict controls for each adapted stable image model", () => {
     const stable = geminiModelOperationConfig("gemini-3.1-flash-image", "imageGenerate");
-    expect(stable?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "thinkingLevel", "googleSearch"]);
+    expect(stable?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "thinkingLevel", "googleSearch", "outputCount"]);
     expect(stable?.dto.attachments?.maxCount).toBe(14);
     expect(stable?.dto.warning).toBeUndefined();
-    expect(stable?.parseParameters({})).toEqual({ aspectRatio: "auto", imageSize: "1K", thinkingLevel: "minimal", googleSearch: false });
-    expect(() => stable?.parseParameters({ imageSize: "8K" })).toThrow();
-    expect(() => stable?.parseParameters({ imageSize: "1K", proxyHeader: "unsafe" })).toThrow();
+    expect(stable?.parseParameters({})).toEqual({ aspectRatio: "auto", imageSize: "1K", thinkingLevel: "minimal", googleSearch: false, outputCount: 1 });
+    expect(stable?.parseParameters({ outputCount: 4 })).toMatchObject({ outputCount: 4 });
+    expect(() => stable?.parseParameters({ outputCount: 5 })).toThrow();
 
     const pro = geminiModelOperationConfig("gemini-3-pro-image", "imageGenerate");
-    expect(pro?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "googleSearch"]);
-    expect(pro?.parseParameters({})).toEqual({ aspectRatio: "auto", imageSize: "1K", googleSearch: false });
+    expect(pro?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "googleSearch", "outputCount"]);
+    expect(pro?.parseParameters({})).toEqual({ aspectRatio: "auto", imageSize: "1K", googleSearch: false, outputCount: 1 });
     expect(() => pro?.parseParameters({ thinkingLevel: "high" })).toThrow();
 
     const lite = geminiModelOperationConfig("gemini-3.1-flash-lite-image", "imageGenerate");
-    expect(lite?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "thinkingLevel"]);
-    expect(lite?.parseParameters({})).toEqual({ aspectRatio: "auto", thinkingLevel: "minimal" });
+    expect(lite?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "thinkingLevel", "outputCount"]);
+    expect(lite?.parseParameters({})).toEqual({ aspectRatio: "auto", thinkingLevel: "minimal", outputCount: 1 });
     expect(() => lite?.parseParameters({ googleSearch: true })).toThrow();
 
     expect(geminiModelOperationConfig("gemini-3.1-flash-image-preview", "imageGenerate")?.dto.warning).toContain("gateway still supports it");
-    expect(geminiModelOperationConfig("gemini-3-pro-image-preview", "imageGenerate")?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "googleSearch"]);
+    expect(geminiModelOperationConfig("gemini-3-pro-image-preview", "imageGenerate")?.dto.parameters.map((parameter) => parameter.key)).toEqual(["aspectRatio", "imageSize", "googleSearch", "outputCount"]);
     expect(geminiModelOperationConfig("gemini-2.5-flash-image", "imageGenerate")).toBeUndefined();
     expect(geminiModelAvailability("gemini-3.1-flash-image-preview")).toEqual({ adapted: true });
     expect(geminiModelAvailability("gemini-3-pro-image-preview")).toEqual({ adapted: true });

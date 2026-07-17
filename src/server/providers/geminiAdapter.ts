@@ -31,27 +31,30 @@ const thinkingParameter = { key: "thinkingLevel", label: "Thinking", type: "enum
 const googleSearchParameter = { key: "googleSearch", label: "Google Search", type: "boolean" as const, default: false, description: "Ground the image in current Google Search results." };
 const attachmentPolicy = (description: string) => ({ accept: ["image/jpeg", "image/png", "image/webp"], maxCount: 14, maxFileBytes: 10 * 1024 * 1024, maxTotalBytes: 14 * 1024 * 1024, description });
 
+const outputCountParameter = { key: "outputCount", label: "Images", type: "enum" as const, default: 1, description: "Keep up to this many images when Gemini returns multiple results.", options: [1, 2, 3, 4].map((value) => ({ label: String(value), value })) };
+
 const flashParameters = z.object({
   aspectRatio: z.enum(["auto", ...geminiImageAspectRatios]).default("auto"),
   imageSize: z.enum(geminiImageSizes).default("1K"),
   thinkingLevel: z.enum(geminiThinkingLevels).default("minimal"),
   googleSearch: z.boolean().default(false),
+  outputCount: z.number().int().min(1).max(4).default(1),
 }).strict();
-const proParameters = z.object({ aspectRatio: z.enum(["auto", ...geminiProImageAspectRatios]).default("auto"), imageSize: z.enum(geminiProImageSizes).default("1K"), googleSearch: z.boolean().default(false) }).strict();
-const flashLiteParameters = z.object({ aspectRatio: z.enum(["auto", ...geminiImageAspectRatios]).default("auto"), thinkingLevel: z.enum(geminiThinkingLevels).default("minimal") }).strict();
+const proParameters = z.object({ aspectRatio: z.enum(["auto", ...geminiProImageAspectRatios]).default("auto"), imageSize: z.enum(geminiProImageSizes).default("1K"), googleSearch: z.boolean().default(false), outputCount: z.number().int().min(1).max(4).default(1) }).strict();
+const flashLiteParameters = z.object({ aspectRatio: z.enum(["auto", ...geminiImageAspectRatios]).default("auto"), thinkingLevel: z.enum(geminiThinkingLevels).default("minimal"), outputCount: z.number().int().min(1).max(4).default(1) }).strict();
 
 const modelConfigs: Record<AdaptedGeminiImageModel, { dto: ModelOperationConfigDto; schema: z.ZodType<OperationParameters> }> = {
   "gemini-3.1-flash-image": {
     schema: flashParameters,
-    dto: { parameters: [aspectRatioParameter(geminiImageAspectRatios), { key: "imageSize", label: "Resolution", type: "enum", default: "1K", options: geminiImageSizes.map((value) => ({ label: value === "512" ? "512 px" : value, value })) }, thinkingParameter, googleSearchParameter], attachments: attachmentPolicy("Up to 14 references; best fidelity with up to 10 objects and 4 characters.") },
+    dto: { parameters: [aspectRatioParameter(geminiImageAspectRatios), { key: "imageSize", label: "Resolution", type: "enum", default: "1K", options: geminiImageSizes.map((value) => ({ label: value === "512" ? "512 px" : value, value })) }, thinkingParameter, googleSearchParameter, outputCountParameter], attachments: attachmentPolicy("Up to 14 references; best fidelity with up to 10 objects and 4 characters.") },
   },
   "gemini-3-pro-image": {
     schema: proParameters,
-    dto: { parameters: [aspectRatioParameter(geminiProImageAspectRatios), { key: "imageSize", label: "Resolution", type: "enum", default: "1K", options: geminiProImageSizes.map((value) => ({ label: value, value })) }, googleSearchParameter], attachments: attachmentPolicy("Up to 14 references; best fidelity with up to 6 objects, 5 characters, and 3 style images.") },
+    dto: { parameters: [aspectRatioParameter(geminiProImageAspectRatios), { key: "imageSize", label: "Resolution", type: "enum", default: "1K", options: geminiProImageSizes.map((value) => ({ label: value, value })) }, googleSearchParameter, outputCountParameter], attachments: attachmentPolicy("Up to 14 references; best fidelity with up to 6 objects, 5 characters, and 3 style images.") },
   },
   "gemini-3.1-flash-lite-image": {
     schema: flashLiteParameters,
-    dto: { parameters: [aspectRatioParameter(geminiImageAspectRatios), thinkingParameter], attachments: attachmentPolicy("Up to 14 references. This efficiency model is best suited to simpler, single-pass edits.") },
+    dto: { parameters: [aspectRatioParameter(geminiImageAspectRatios), thinkingParameter, outputCountParameter], attachments: attachmentPolicy("Up to 14 references. This efficiency model is best suited to simpler, single-pass edits.") },
   },
 };
 
