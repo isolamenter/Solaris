@@ -19,6 +19,8 @@ export function openDatabase(dataDir: string) {
     CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, remote_id TEXT, attempts INTEGER NOT NULL, next_poll_at TEXT, lease_token TEXT, lease_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, storage_key TEXT NOT NULL UNIQUE, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS run_assets (run_id TEXT NOT NULL, asset_id TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(run_id, asset_id, kind));
+    CREATE TABLE IF NOT EXISTS batch_jobs (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, model_id TEXT NOT NULL, provider_model_id TEXT NOT NULL, display_name TEXT NOT NULL, status TEXT NOT NULL, remote_id TEXT, total_count INTEGER NOT NULL, submitted_count INTEGER NOT NULL DEFAULT 0, succeeded_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0, inspector_json TEXT, error_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS batch_entries (id TEXT PRIMARY KEY, batch_job_id TEXT NOT NULL, idx INTEGER NOT NULL, prompt TEXT NOT NULL, parameters_json TEXT NOT NULL, asset_ids_json TEXT NOT NULL, run_id TEXT, status TEXT NOT NULL DEFAULT 'pending', error_json TEXT, created_at TEXT NOT NULL, UNIQUE(batch_job_id, idx));
   `);
   return { sqlite, orm: drizzle(sqlite, { schema }) };
 }

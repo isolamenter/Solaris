@@ -9,6 +9,13 @@ export type ImageResult = { assets: { bytes: Buffer; mimeType: string }[]; inspe
 export type VideoSubmission = { remoteId: string; inspector: Record<string, unknown> };
 export type VideoPoll = { state: "pending" | "success" | "error"; assets?: { bytes: Buffer; mimeType: string }[]; error?: string; inspector: Record<string, unknown> };
 
+export type BatchInlineRequest = { key: string; request: Record<string, unknown> };
+export type BatchSubmitInput = { model: string; requests: BatchInlineRequest[]; displayName?: string };
+export type BatchSubmitResult = { remoteId: string; totalCount: number; inspector: Record<string, unknown> };
+export type BatchPollState = "submitting" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+export type BatchPollResult = { state: BatchPollState; responseFile?: string; error?: string; inspector: Record<string, unknown> };
+export type BatchEntryResult = { key?: string; response?: Record<string, unknown>; error?: { code?: number; message?: string; status?: string } };
+
 export type ProviderProfile = { id: string; pluginId: ProviderId; baseUrl: string; config: Record<string, unknown>; apiKey: string };
 export type DiscoveredModel = { providerModelId: string; label?: string; capabilities: Capability[] };
 export type ProviderModelOperationConfig = {
@@ -27,5 +34,11 @@ export type ProviderPlugin = {
   operations: {
     imageGenerate?: (profile: ProviderProfile, input: ImageInput) => Promise<ImageResult>;
     videoGenerate?: { submit: (profile: ProviderProfile, input: VideoInput) => Promise<VideoSubmission>; poll: (profile: ProviderProfile, remoteId: string) => Promise<VideoPoll>; cancel?: (profile: ProviderProfile, remoteId: string) => Promise<void> };
+    batchGenerate?: {
+      submit: (profile: ProviderProfile, input: BatchSubmitInput) => Promise<BatchSubmitResult>;
+      poll: (profile: ProviderProfile, remoteId: string) => Promise<BatchPollResult>;
+      cancel?: (profile: ProviderProfile, remoteId: string) => Promise<void>;
+      download: (profile: ProviderProfile, fileName: string) => Promise<BatchEntryResult[]>;
+    };
   };
 };

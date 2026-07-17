@@ -114,6 +114,17 @@ export function geminiImageRequest(model: string, prompt: string, attachments: A
   };
 }
 
+export function geminiBatchRequest(model: string, prompt: string, attachments: Attachment[] = [], parameters: OperationParameters = {}) {
+  const adapted = adaptedImageModel(model);
+  const parsed = adapted ? modelConfigs[adapted].schema.parse(parameters) : undefined;
+  const generationConfig = adapted ? geminiImageGenerationConfig(model, parameters) : { responseModalities: ["TEXT", "IMAGE"] };
+  return {
+    contents: [{ role: "user", parts: geminiParts(prompt, attachments) }],
+    generationConfig,
+    ...(parsed && "googleSearch" in parsed && parsed.googleSearch ? { tools: [{ googleSearch: {} }] } : {}),
+  };
+}
+
 export function adaptGeminiOutput(data: { candidates?: { content?: { parts?: { text?: string; inlineData?: { mimeType?: string; data?: string } }[] } }[] }) {
   const parts = data.candidates?.flatMap((candidate) => candidate.content?.parts ?? []) ?? [];
   return {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AssetStore } from "./assets.js";
 import type { SqliteDatabase } from "./db/index.js";
 import { AppError } from "./errors.js";
-import type { AssetDto, Capability, ConversationDto, JobDto, MessageDto, ModelDto, Operation, ProfileDto, ProviderId, RunDto, RunStatus } from "../shared/contracts.js";
+import type { AssetDto, BatchEntryDto, BatchJobDto, BatchJobStatus, Capability, ConversationDto, JobDto, MessageDto, ModelDto, Operation, ProfileDto, ProviderId, RunDto, RunStatus } from "../shared/contracts.js";
 
 const now = () => new Date().toISOString();
 const parse = <T>(value: string | null | undefined, fallback: T): T => { try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; } };
@@ -14,6 +14,8 @@ type RunRow = { id: string; profile_id: string; model_id: string; operation: Ope
 type ConversationRow = { id: string; profile_id: string; model_id: string; title: string; created_at: string; updated_at: string };
 type JobRow = { id: string; run_id: string; state: string; remote_id: string | null; attempts: number; next_poll_at: string | null; created_at: string; updated_at: string };
 type AssetRow = { id: string; mime_type: string; byte_size: number; storage_key: string; created_at: string };
+type BatchJobRow = { id: string; profile_id: string; model_id: string; provider_model_id: string; display_name: string; status: BatchJobStatus; remote_id: string | null; total_count: number; submitted_count: number; succeeded_count: number; failed_count: number; inspector_json: string | null; error_json: string | null; created_at: string; updated_at: string };
+type BatchEntryRow = { id: string; batch_job_id: string; idx: number; prompt: string; parameters_json: string; asset_ids_json: string; run_id: string | null; status: string; error_json: string | null; created_at: string };
 
 export class Repository {
   constructor(private readonly sqlite: SqliteDatabase, private readonly assetStore: AssetStore) {}
@@ -61,5 +63,87 @@ export class Repository {
   markPolling(id: string, remoteId: string) { const time = now(); this.sqlite.prepare("UPDATE jobs SET state='polling',remote_id=?,next_poll_at=?,updated_at=? WHERE id=?").run(remoteId, new Date(Date.now() + 5_000).toISOString(), time, id); }
   markJobDone(id: string, state: "success" | "error" | "cancelled" | "uncertain") { this.sqlite.prepare("UPDATE jobs SET state=?,next_poll_at=NULL,updated_at=? WHERE id=?").run(state, now(), id); }
   cancelJob(runId: string) { this.sqlite.prepare("UPDATE jobs SET state='cancelled',updated_at=? WHERE run_id=? AND state NOT IN ('success','error','uncertain')").run(now(), runId); }
-  clearHistory() { this.sqlite.transaction(() => { this.sqlite.exec("DELETE FROM messages; DELETE FROM conversations; DELETE FROM run_assets; DELETE FROM jobs; DELETE FROM runs;"); this.assetStore.clear(); })(); }
+  clearHistory() { this.sqlite.transaction(() => { this.sqlite.exec("DELETE FROM messages; DELETE FROM conversations; DELETE FROM run_assets; DELETE FROM jobs; DELETE FROM runs; DELETE FROM batch_entries; DELETE FROM batch_jobs;"); this.assetStore.clear(); })(); }
+
+  private batchJobDto(row: BatchJobRow, entries: BatchEntryDto[] = []): BatchJobDto {
+    return {
+      id: row.id, profileId: row.profile_id, modelId: row.model_id, providerModelId: row.provider_model_id,
+      displayName: row.display_name, status: row.status, remoteId: row.remote_id,
+      totalCount: row.total_count, submittedCount: row.submitted_count,
+      succeededCount: row.succeeded_count, failedCount: row.failed_count,
+      inspector: parse(row.inspector_json, null), error: parse(row.error_json, null),
+      entries, createdAt: row.created_at, updatedAt: row.updated_at,
+    };
+  }
+  private batchEntryDto(row: BatchEntryRow): BatchEntryDto {
+    return {
+      id: row.id, batchJobId: row.batch_job_id, index: row.idx, prompt: row.prompt,
+      modelId: row.id, parameters: parse(row.parameters_json, {}),
+      assetIds: parse<string[]>(row.asset_ids_json, []), runId: row.run_id,
+      status: row.status as BatchEntryDto["status"], error: parse(row.error_json, null),
+      createdAt: row.created_at,
+    };
+  }
+  createBatchJob(input: { id: string; profileId: string; modelId: string; providerModelId: string; displayName: string }) {
+    const time = now();
+    this.sqlite.prepare("INSERT INTO batch_jobs (id,profile_id,model_id,provider_model_id,display_name,status,total_count,submitted_count,succeeded_count,failed_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(input.id, input.profileId, input.modelId, input.providerModelId, input.displayName, "draft", 0, 0, 0, 0, time, time);
+    return this.getBatchJob(input.id);
+  }
+  getBatchJob(id: string) {
+    const row = this.sqlite.prepare("SELECT * FROM batch_jobs WHERE id=?").get(id) as BatchJobRow | undefined;
+    if (!row) throw new AppError("BATCH_NOT_FOUND", "Batch job not found", 404);
+    const entries = (this.sqlite.prepare("SELECT * FROM batch_entries WHERE batch_job_id=? ORDER BY idx").all(id) as BatchEntryRow[]).map((entry) => this.batchEntryDto(entry));
+    return this.batchJobDto(row, entries);
+  }
+  listBatchJobs() {
+    return (this.sqlite.prepare("SELECT * FROM batch_jobs ORDER BY created_at DESC LIMIT 100").all() as BatchJobRow[]).map((row) => this.batchJobDto(row));
+  }
+  deleteBatchJob(id: string) {
+    this.getBatchJob(id);
+    this.sqlite.transaction(() => {
+      this.sqlite.prepare("DELETE FROM batch_entries WHERE batch_job_id=?").run(id);
+      this.sqlite.prepare("DELETE FROM batch_jobs WHERE id=?").run(id);
+    })();
+  }
+  setBatchJobStatus(id: string, status: BatchJobStatus, fields: { remoteId?: string | null; inspector?: Record<string, unknown> | null; error?: { code: string; message: string } | null; submittedCount?: number; succeededCount?: number; failedCount?: number } = {}) {
+    this.getBatchJob(id);
+    const time = now();
+    const current = { status, ...fields };
+    this.sqlite.prepare("UPDATE batch_jobs SET status=?,remote_id=COALESCE(?,remote_id),inspector_json=COALESCE(?,inspector_json),error_json=COALESCE(?,error_json),submitted_count=COALESCE(?,submitted_count),succeeded_count=COALESCE(?,succeeded_count),failed_count=COALESCE(?,failed_count),updated_at=? WHERE id=?")
+      .run(current.status, fields.remoteId ?? null, fields.inspector !== undefined ? JSON.stringify(fields.inspector) : null, fields.error !== undefined ? JSON.stringify(fields.error) : null, fields.submittedCount ?? null, fields.succeededCount ?? null, fields.failedCount ?? null, time, id);
+  }
+  addBatchEntry(input: { id: string; batchJobId: string; prompt: string; parameters: Record<string, unknown>; assetIds: string[]; modelId: string }) {
+    this.getBatchJob(input.batchJobId);
+    const time = now();
+    const nextIndex = (this.sqlite.prepare("SELECT COALESCE(MAX(idx)+1, 0) AS next FROM batch_entries WHERE batch_job_id=?").get(input.batchJobId) as { next: number }).next;
+    this.sqlite.transaction(() => {
+      this.sqlite.prepare("INSERT INTO batch_entries (id,batch_job_id,idx,prompt,parameters_json,asset_ids_json,status,created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(input.id, input.batchJobId, nextIndex, input.prompt, JSON.stringify(input.parameters), JSON.stringify(input.assetIds), "pending", time);
+      this.sqlite.prepare("UPDATE batch_jobs SET total_count=total_count+1,updated_at=? WHERE id=?").run(time, input.batchJobId);
+    })();
+    return this.getBatchJob(input.batchJobId);
+  }
+  listBatchEntries(batchJobId: string) {
+    return (this.sqlite.prepare("SELECT * FROM batch_entries WHERE batch_job_id=? ORDER BY idx").all(batchJobId) as BatchEntryRow[]).map((row) => this.batchEntryDto(row));
+  }
+  getBatchEntry(id: string) {
+    const row = this.sqlite.prepare("SELECT * FROM batch_entries WHERE id=?").get(id) as BatchEntryRow | undefined;
+    if (!row) throw new AppError("BATCH_ENTRY_NOT_FOUND", "Batch entry not found", 404);
+    return this.batchEntryDto(row);
+  }
+  deleteBatchEntry(id: string) {
+    const entry = this.getBatchEntry(id);
+    const time = now();
+    this.sqlite.transaction(() => {
+      this.sqlite.prepare("DELETE FROM batch_entries WHERE id=?").run(id);
+      this.sqlite.prepare("UPDATE batch_jobs SET total_count=MAX(total_count-1, 0),updated_at=? WHERE id=?").run(time, entry.batchJobId);
+    })();
+  }
+  setBatchEntryStatus(id: string, status: BatchEntryDto["status"], fields: { runId?: string; error?: { code: string; message: string } | null } = {}) {
+    this.getBatchEntry(id);
+    this.sqlite.prepare("UPDATE batch_entries SET status=?,run_id=COALESCE(?,run_id),error_json=COALESCE(?,error_json) WHERE id=?")
+      .run(status, fields.runId ?? null, fields.error !== undefined ? JSON.stringify(fields.error) : null, id);
+  }
+  dueBatchJobs() { return this.sqlite.prepare("SELECT * FROM batch_jobs WHERE status IN ('submitting','running') ORDER BY updated_at LIMIT 8").all() as BatchJobRow[]; }
 }

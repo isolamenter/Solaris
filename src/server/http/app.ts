@@ -23,6 +23,8 @@ const modelInput = z.object({ providerModelId: z.string().trim().min(1).max(200)
 const operationParameters = z.record(z.string().min(1).max(80), z.union([z.string().max(200), z.number(), z.boolean()])).refine((value) => Object.keys(value).length <= 16, "Too many parameters");
 const imageInput = z.object({ profileId: z.string().uuid(), modelId: z.string().uuid(), operation: z.literal("imageGenerate"), prompt: z.string().min(1).max(100_000), size: z.string().max(50).optional(), assetIds: z.array(z.string().uuid()).max(14).optional(), parameters: operationParameters.optional() });
 const videoInput = z.object({ profileId: z.string().uuid(), modelId: z.string().uuid(), operation: z.literal("videoGenerate"), prompt: z.string().min(1).max(100_000), durationSeconds: z.number().int().min(1).max(60).optional(), size: z.string().max(50).optional() });
+const batchCreateInput = z.object({ profileId: z.string().uuid(), modelId: z.string().uuid(), displayName: z.string().trim().min(1).max(120).optional() });
+const batchEntryInput = z.object({ prompt: z.string().min(1).max(100_000), parameters: operationParameters.optional(), assetIds: z.array(z.string().uuid()).max(14).optional() });
 
 function issue(error: unknown) {
   if (error instanceof ZodError) return new AppError("VALIDATION", "Request validation failed", 400, error.issues.map((item) => ({ path: item.path.join("."), message: item.message })));
@@ -77,6 +79,15 @@ export async function createApp() {
   app.post("/api/runs/:id/cancel", async (request) => service.cancelRun((request.params as { id: string }).id));
   app.get("/api/runs/:id/curl", async (request) => { const run = repo.getRun((request.params as { id: string }).id); return { curl: curlFor(run, repo.getProfile(run.profileId), repo.getModel(run.modelId)) }; });
   app.get("/api/jobs/:runId", async (request) => repo.getJobForRun((request.params as { runId: string }).runId));
+  app.get("/api/batches", async () => service.listBatchJobs());
+  app.post("/api/batches", async (request, reply) => reply.status(201).send(service.createBatchJob(batchCreateInput.parse(request.body))));
+  app.get("/api/batches/:id", async (request) => service.getBatchJob((request.params as { id: string }).id));
+  app.delete("/api/batches/:id", async (request, reply) => { service.deleteBatchJob((request.params as { id: string }).id); reply.status(204).send(); });
+  app.post("/api/batches/:id/entries", async (request, reply) => reply.status(201).send(service.addBatchEntry({ batchJobId: (request.params as { id: string }).id, ...batchEntryInput.parse(request.body) })));
+  app.delete("/api/batches/:id/entries/:entryId", async (request, reply) => { service.deleteBatchEntry((request.params as { entryId: string }).entryId); reply.status(204).send(); });
+  app.post("/api/batches/:id/submit", async (request) => service.submitBatchJob((request.params as { id: string }).id));
+  app.post("/api/batches/:id/cancel", async (request) => service.cancelBatchJob((request.params as { id: string }).id));
+  app.get("/api/batches/:id/jsonl", async (request, reply) => { const text = service.previewBatchJsonl((request.params as { id: string }).id); reply.header("content-type", "application/jsonl").header("content-disposition", `attachment; filename="batch-${(request.params as { id: string }).id}.jsonl"`).send(text); });
   app.post("/api/settings/clear-history", async (_request, reply) => { repo.clearHistory(); reply.status(204).send(); });
   await installClient(app); runner.start();
   app.addHook("onClose", async () => { runner.stop(); database.sqlite.close(); });

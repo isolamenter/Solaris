@@ -13,7 +13,10 @@ export class VideoRunner {
   stop() { if (this.timer) clearInterval(this.timer); }
   async tick() {
     if (this.busy) return; this.busy = true;
-    try { for (const job of this.repo.dueJobs()) await this.process(job); } finally { this.busy = false; }
+    try {
+      for (const job of this.repo.dueJobs()) await this.process(job);
+      for (const batch of this.repo.dueBatchJobs()) await this.processBatch(batch);
+    } finally { this.busy = false; }
   }
   private async process(job: { id: string; run_id: string; state: string; remote_id: string | null }) {
     const run = this.repo.getRun(job.run_id); if (["success", "error", "cancelled", "uncertain"].includes(run.status)) return;
@@ -25,5 +28,8 @@ export class VideoRunner {
     }
     if (job.state !== "polling" || !job.remote_id) return;
     try { const result = await video.poll(this.service.providerProfile(run.profileId), job.remote_id); if (result.state === "pending") return; if (result.state === "error") { this.repo.markJobDone(job.id, "error"); this.repo.finishRun(run.id, "error", null, redact(result.inspector) as Record<string, unknown>, { code: "VIDEO_FAILED", message: result.error ?? "Video generation failed" }); return; } const assets = (result.assets ?? []).map((asset) => this.assets.save(asset.bytes, asset.mimeType)); this.repo.linkAssets(run.id, assets); this.repo.markJobDone(job.id, "success"); this.repo.finishRun(run.id, "success", { assetCount: assets.length }, redact(result.inspector) as Record<string, unknown>); } catch (error) { const safe = toAppError(error); this.repo.markJobDone(job.id, "error"); this.repo.finishRun(run.id, "error", null, null, { code: safe.code, message: safe.message }); }
+  }
+  private async processBatch(batch: { id: string }) {
+    try { await this.service.processBatchJob(this.repo.getBatchJob(batch.id)); } catch { /* service already records errors on the batch job */ }
   }
 }

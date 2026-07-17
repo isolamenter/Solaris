@@ -3,6 +3,7 @@ export type ProviderId = (typeof providerIds)[number];
 export type Operation = "imageGenerate" | "videoGenerate";
 export type RunStatus = "running" | "queued" | "success" | "error" | "cancelled" | "uncertain";
 export type Capability = "imageGenerate" | "videoGenerate";
+export type BatchJobStatus = "draft" | "submitting" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
 
 export type ParameterOptionDto = { label: string; value: string | number | boolean; detail?: string };
 export type OperationParameterDto = {
@@ -75,4 +76,37 @@ export type RunDto = {
 };
 
 export type JobDto = { id: string; runId: string; state: string; remoteId: string | null; attempts: number; nextPollAt: string | null; createdAt: string; updatedAt: string };
+
+export type BatchEntryDto = {
+  id: string;
+  batchJobId: string;
+  index: number;
+  prompt: string;
+  modelId: string;
+  parameters: Record<string, unknown>;
+  assetIds: string[];
+  runId: string | null;
+  status: RunStatus | "pending";
+  error: { code: string; message: string } | null;
+  createdAt: string;
+};
+
+export type BatchJobDto = {
+  id: string;
+  profileId: string;
+  modelId: string;
+  providerModelId: string;
+  displayName: string;
+  status: BatchJobStatus;
+  remoteId: string | null;
+  totalCount: number;
+  submittedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  inspector: Record<string, unknown> | null;
+  error: { code: string; message: string } | null;
+  entries: BatchEntryDto[];
+  createdAt: string;
+  updatedAt: string;
+};
 export type ApiError = { error: { code: string; message: string; details?: unknown } };

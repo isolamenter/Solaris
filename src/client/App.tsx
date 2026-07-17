@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import type { AssetDto, AttachmentPolicyDto, Capability, ModelDto, ModelOperationConfigDto, OperationParameterDto, ProfileDto, RunDto } from "../shared/contracts";
-import { api, ApiClientError, listModels, listProfiles, listRuns, upload } from "./api";
+import type { AssetDto, AttachmentPolicyDto, BatchJobDto, Capability, ModelDto, ModelOperationConfigDto, OperationParameterDto, ProfileDto, RunDto } from "../shared/contracts";
+import { addBatchEntry, api, ApiClientError, cancelBatch, createBatch, deleteBatch, deleteBatchEntry, getBatch, listBatches, listModels, listProfiles, listRuns, previewBatchJsonl, submitBatch, upload } from "./api";
 
 type Plugin = { id: ProfileDto["pluginId"]; label: string; fields: { name: string; label: string; type: string; placeholder?: string }[]; operations: string[] };
-type Page = "playground" | "connections" | "history" | "settings";
+type Page = "playground" | "connections" | "batches" | "history" | "settings";
 const operationLabels: Record<string, string> = { imageGenerate: "Generate image", videoGenerate: "Generate video" };
 function modelCapabilityLabels(capabilities: Capability[]) {
   const labels: string[] = [];
@@ -14,15 +14,20 @@ function modelCapabilityLabels(capabilities: Capability[]) {
 const navigation: { id: Page; label: string; index: string }[] = [
   { id: "playground", label: "Workspace", index: "01" },
   { id: "connections", label: "Connections", index: "02" },
-  { id: "history", label: "Run archive", index: "03" },
-  { id: "settings", label: "Settings", index: "04" },
+  { id: "batches", label: "Batch calls", index: "03" },
+  { id: "history", label: "Run archive", index: "04" },
+  { id: "settings", label: "Settings", index: "05" },
 ];
 function message(error: unknown) { return error instanceof ApiClientError ? error.message : error instanceof Error ? error.message : "Unexpected error"; }
 function firstUsableModel(models: ModelDto[]) { return models.find((model) => model.enabled && model.adapted)?.id ?? ""; }
+const batchStatusLabels: Record<BatchJobDto["status"], string> = {
+  draft: "Draft", submitting: "Submitting…", running: "Running…",
+  succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", expired: "Expired",
+};
 
 export function App() {
-  const [page, setPage] = useState<Page>("playground"); const [profiles, setProfiles] = useState<ProfileDto[]>([]); const [models, setModels] = useState<ModelDto[]>([]); const [runs, setRuns] = useState<RunDto[]>([]); const [plugins, setPlugins] = useState<Plugin[]>([]); const [selectedProfileId, setSelectedProfileId] = useState<string>(""); const [selectedModelId, setSelectedModelId] = useState<string>(""); const [notice, setNotice] = useState<string>("");
-  const refresh = useCallback(async () => { try { const [nextProfiles, nextRuns, nextPlugins] = await Promise.all([listProfiles(), listRuns(), api<Plugin[]>("/api/plugins")]); setProfiles(nextProfiles); setRuns(nextRuns); setPlugins(nextPlugins); const profileId = selectedProfileId && nextProfiles.some((x) => x.id === selectedProfileId) ? selectedProfileId : nextProfiles[0]?.id ?? ""; setSelectedProfileId(profileId); if (profileId) { const nextModels = await listModels(profileId); setModels(nextModels); const modelId = selectedModelId && nextModels.some((x) => x.id === selectedModelId && x.enabled && x.adapted) ? selectedModelId : firstUsableModel(nextModels); setSelectedModelId(modelId); } else { setModels([]); setSelectedModelId(""); } } catch (error) { setNotice(message(error)); } }, [selectedModelId, selectedProfileId]);
+  const [page, setPage] = useState<Page>("playground"); const [profiles, setProfiles] = useState<ProfileDto[]>([]); const [models, setModels] = useState<ModelDto[]>([]); const [runs, setRuns] = useState<RunDto[]>([]); const [plugins, setPlugins] = useState<Plugin[]>([]); const [batches, setBatches] = useState<BatchJobDto[]>([]); const [selectedProfileId, setSelectedProfileId] = useState<string>(""); const [selectedModelId, setSelectedModelId] = useState<string>(""); const [notice, setNotice] = useState<string>("");
+  const refresh = useCallback(async () => { try { const [nextProfiles, nextRuns, nextPlugins, nextBatches] = await Promise.all([listProfiles(), listRuns(), api<Plugin[]>("/api/plugins"), listBatches()]); setProfiles(nextProfiles); setRuns(nextRuns); setPlugins(nextPlugins); setBatches(nextBatches); const profileId = selectedProfileId && nextProfiles.some((x) => x.id === selectedProfileId) ? selectedProfileId : nextProfiles[0]?.id ?? ""; setSelectedProfileId(profileId); if (profileId) { const nextModels = await listModels(profileId); setModels(nextModels); const modelId = selectedModelId && nextModels.some((x) => x.id === selectedModelId && x.enabled && x.adapted) ? selectedModelId : firstUsableModel(nextModels); setSelectedModelId(modelId); } else { setModels([]); setSelectedModelId(""); } } catch (error) { setNotice(message(error)); } }, [selectedModelId, selectedProfileId]);
   useEffect(() => { void refresh(); }, []);
   const selectProfile = async (id: string) => { setSelectedProfileId(id); setSelectedModelId(""); try { const next = await listModels(id); setModels(next); setSelectedModelId(firstUsableModel(next)); } catch (error) { setNotice(message(error)); } };
   const selectedProfile = profiles.find((item) => item.id === selectedProfileId); const selectedModel = models.find((item) => item.id === selectedModelId);
@@ -39,6 +44,7 @@ export function App() {
       <div className="page-stage">
         {page === "playground" && <Playground profiles={profiles} models={models} selectedProfile={selectedProfile} selectedModel={selectedModel} selectProfile={selectProfile} selectModel={setSelectedModelId} onRefresh={refresh} onNotice={setNotice} />}
         {page === "connections" && <Connections profiles={profiles} plugins={plugins} models={models} selectedProfile={selectedProfile} onSelect={selectProfile} onRefresh={refresh} onNotice={setNotice} />}
+        {page === "batches" && <Batches batches={batches} profiles={profiles} models={models} selectedProfileId={selectedProfileId} selectedModelId={selectedModelId} selectProfile={selectProfile} selectModel={setSelectedModelId} onRefresh={refresh} onNotice={setNotice} />}
         {page === "history" && <History runs={runs} onRefresh={refresh} onNotice={setNotice} />}
         {page === "settings" && <Settings onRefresh={refresh} onNotice={setNotice} />}
       </div>
@@ -105,3 +111,95 @@ function Settings({ onRefresh, onNotice }: { onRefresh: () => Promise<void>; onN
 function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><h3>{title}</h3><p>{text}</p></div>; }
 function RunView({ run }: { run: RunDto }) { return <div><p><b>{run.status}</b>{run.error ? ` — ${run.error.message}` : ""}</p>{run.assets.map((asset) => <Media asset={asset} key={asset.id} />)}<details><summary>Inspector (redacted)</summary><pre>{JSON.stringify(run.inspector, null, 2)}</pre></details></div>; }
 function Media({ asset }: { asset: AssetDto }) { return asset.mimeType.startsWith("video/") ? <video controls src={asset.url} /> : asset.mimeType.startsWith("image/") ? <img src={asset.url} alt="Generated or attached asset" /> : <a href={asset.url}>Download {asset.mimeType}</a>; }
+
+function Batches({ batches, profiles, models, selectedProfileId, selectedModelId, selectProfile, selectModel, onRefresh, onNotice }: { batches: BatchJobDto[]; profiles: ProfileDto[]; models: ModelDto[]; selectedProfileId: string; selectedModelId: string; selectProfile: (id: string) => Promise<void>; selectModel: (id: string) => void; onRefresh: () => Promise<void>; onNotice: (text: string) => void }) {
+  const [activeId, setActiveId] = useState<string>("");
+  const [active, setActive] = useState<BatchJobDto | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftProfileId, setDraftProfileId] = useState(selectedProfileId);
+  const [draftModelId, setDraftModelId] = useState(selectedModelId);
+  const [entryPrompt, setEntryPrompt] = useState("");
+  const [entryParams, setEntryParams] = useState<ParameterValues>({});
+  const [entryAssets, setEntryAssets] = useState<AssetDto[]>([]);
+  const [jsonl, setJsonl] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setDraftProfileId(selectedProfileId); setDraftModelId(selectedModelId); }, [selectedProfileId, selectedModelId]);
+  useEffect(() => { if (!activeId && batches[0]) setActiveId(batches[0].id); }, [batches, activeId]);
+
+  const loadActive = useCallback(async (id: string) => {
+    if (!id) { setActive(null); return; }
+    try { setActive(await getBatch(id)); }
+    catch (error) { onNotice(message(error)); }
+  }, [onNotice]);
+
+  useEffect(() => { void loadActive(activeId); }, [activeId, loadActive]);
+
+  useEffect(() => {
+    if (!active || !["submitting", "running"].includes(active.status)) return;
+    const timer = setInterval(() => { void loadActive(active.id).then(() => onRefresh()); }, 10_000);
+    return () => clearInterval(timer);
+  }, [active, loadActive, onRefresh]);
+
+  async function create() {
+    if (!draftProfileId || !draftModelId) { onNotice("Choose a connection and an adapted model first."); return; }
+    setBusy(true);
+    try { const job = await createBatch({ profileId: draftProfileId, modelId: draftModelId, displayName: draftName || undefined }); setDraftName(""); setActiveId(job.id); await onRefresh(); }
+    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+  }
+  async function addEntry() {
+    if (!active || active.status !== "draft") return; if (!entryPrompt.trim()) return;
+    setBusy(true);
+    try { const updated = await addBatchEntry(active.id, { prompt: entryPrompt, parameters: entryParams, assetIds: entryAssets.map((asset) => asset.id) }); setActive(updated); setEntryPrompt(""); setEntryParams({}); setEntryAssets([]); await onRefresh(); }
+    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+  }
+  async function preview() {
+    if (!active) return;
+    try { setJsonl(await previewBatchJsonl(active.id)); }
+    catch (error) { onNotice(message(error)); }
+  }
+  async function submit() {
+    if (!active) return;
+    setBusy(true);
+    try { setActive(await submitBatch(active.id)); await onRefresh(); }
+    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+  }
+  async function cancel() {
+    if (!active) return;
+    setBusy(true);
+    try { setActive(await cancelBatch(active.id)); await onRefresh(); }
+    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+  }
+  async function removeBatch(id: string) {
+    try { await deleteBatch(id); if (activeId === id) { setActiveId(""); setActive(null); } await onRefresh(); }
+    catch (error) { onNotice(message(error)); }
+  }
+  async function removeEntry(entryId: string) {
+    if (!active) return;
+    try { setActive(await getBatch(active.id)); await deleteBatchEntry(active.id, entryId); setActive(await getBatch(active.id)); await onRefresh(); }
+    catch (error) { onNotice(message(error)); }
+  }
+  const draftModel = models.find((model) => model.id === draftModelId);
+  const draftConfig = draftModel?.operationConfigs.imageGenerate;
+  const live = !!active && (active.status === "running" || active.status === "submitting");
+  const progress = active && active.totalCount ? Math.round(((active.succeededCount + active.failedCount) / active.totalCount) * 100) : 0;
+  return <section><div className="title-row"><h2>Batch calls</h2>{active && live && <span className="batch-status live">Live · {batchStatusLabels[active.status]}</span>}</div>
+    {!profiles.length ? <Empty title="No connections yet" text="Create a named connection before building a batch." /> : <>
+      <div className="card stack"><h3>Start a batch</h3><div className="selectors"><label>Connection<select value={draftProfileId} onChange={(event) => { setDraftProfileId(event.target.value); void selectProfile(event.target.value); }}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.pluginId}</option>)}</select></label><label>Model<select value={draftModelId} onChange={(event) => { setDraftModelId(event.target.value); selectModel(event.target.value); }}><option value="" disabled>Select an adapted model</option>{models.filter((model) => model.enabled).map((model) => <option value={model.id} disabled={!model.adapted} key={model.id}>{model.label}{model.adapted ? "" : " — Not adapted"}</option>)}</select></label><label>Display name<input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="My batch run" /></label></div><p className="muted">Each new request becomes one JSONL line. The whole batch is submitted as a single inline Gemini Batch API call (50% price, ≤24h).</p><button className="primary" disabled={busy || !draftProfileId || !draftModelId} onClick={() => void create()}>Create draft</button></div>
+      {batches.length > 0 && <div className="card stack"><h3>Recent batches</h3><ul className="batch-list">{batches.map((job) => <li key={job.id} className={job.id === activeId ? "active" : ""}><button type="button" className="batch-link" onClick={() => setActiveId(job.id)}><b>{job.displayName}</b><small>{job.providerModelId} · {batchStatusLabels[job.status]} · {job.succeededCount}/{job.totalCount} ok</small></button><button type="button" aria-label={`Delete batch ${job.displayName}`} onClick={() => void removeBatch(job.id)}>×</button></li>)}</ul></div>}
+      {active && <div className="card stack">
+        <div className="title-row"><h3>{active.displayName}</h3><span className={`batch-status ${active.status}`}>{batchStatusLabels[active.status]}</span></div>
+        <p className="muted">{active.entries.length} request{active.entries.length === 1 ? "" : "s"} · succeeded {active.succeededCount} · failed {active.failedCount}{active.remoteId ? ` · remote ${active.remoteId}` : ""}</p>
+        {live && <div className="batch-progress" aria-label="Batch progress"><span style={{ width: `${progress}%` }} /><small>{progress}% processed</small></div>}
+        {active.error && <div className="model-warning" role="status"><b>Batch error</b><span>{active.error.message}</span></div>}
+        {active.status === "draft" && <>
+          <div className="batch-entry-form"><label className="prompt-label">Add a request to this batch</label><textarea value={entryPrompt} onChange={(event) => setEntryPrompt(event.target.value)} placeholder="Describe the image you want…" rows={5} />{draftConfig?.attachments && <AssetPicker assets={entryAssets} contextAssets={[]} policy={draftConfig.attachments} onChange={setEntryAssets} onNotice={onNotice} disabled={busy} />}{draftConfig?.parameters && <ParameterPanel definitions={draftConfig.parameters} values={entryParams} onChange={(key, value) => setEntryParams((current) => ({ ...current, [key]: value }))} />}<div className="row"><span className="spacer" /><button type="button" className="primary" disabled={busy || !entryPrompt.trim()} onClick={() => void addEntry()}>Add request</button></div></div>
+          {active.entries.length > 0 && <ul className="batch-entry-list">{active.entries.map((entry) => <li key={entry.id}><div><b>#{entry.index + 1}</b><span>{entry.prompt.length > 180 ? `${entry.prompt.slice(0, 180)}…` : entry.prompt}</span><small>{entry.assetIds.length} reference{entry.assetIds.length === 1 ? "" : "s"}</small></div><button type="button" aria-label={`Remove entry ${entry.index + 1}`} onClick={() => void removeEntry(entry.id)}>×</button></li>)}</ul>}
+          <div className="batch-actions"><button type="button" disabled={busy || active.entries.length === 0} onClick={() => void preview()}>Preview JSONL</button><button type="button" className="primary" disabled={busy || active.entries.length === 0} onClick={() => void submit()}>Submit batch</button></div>
+          {jsonl && <pre className="card batch-jsonl">{jsonl}</pre>}
+        </>}
+        {(active.status === "succeeded" || active.status === "failed" || active.status === "cancelled" || active.status === "expired") && <ul className="batch-entry-list">{active.entries.map((entry) => <li key={entry.id} className={entry.status}><div><b>#{entry.index + 1}</b><span>{entry.prompt.length > 180 ? `${entry.prompt.slice(0, 180)}…` : entry.prompt}</span><small>status: {entry.status}{entry.error ? ` — ${entry.error.message}` : ""}</small></div>{entry.runId && <a href={`/api/runs/${entry.runId}`}>Open run</a>}</li>)}</ul>}
+        {live && <div className="batch-actions"><button type="button" className="danger" onClick={() => void cancel()}>Cancel batch</button></div>}
+      </div>}
+    </>}</section>;
+}

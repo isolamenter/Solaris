@@ -76,3 +76,17 @@ test("Gemini workspace exposes adapted controls and disables unadapted models", 
   await expect(page.getByText("1 / 14")).toBeVisible();
   await expect(page.getByRole("button", { name: "Generate" })).toBeVisible();
 });
+
+test("Batch page accepts a new draft after a connection exists", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Batch calls" })).toBeVisible();
+  await page.getByRole("button", { name: "Batch calls" }).click();
+  await expect(page.getByRole("heading", { name: "Batch calls" })).toBeVisible();
+  await page.getByRole("button", { name: "Connections" }).click();
+  await page.getByRole("button", { name: "New connection" }).click();
+  await page.getByLabel("Name").fill(`Batch E2E ${Date.now()}`);
+  await page.getByLabel("API key").fill("test-key");
+  await page.getByRole("button", { name: "Save connection" }).click();
+  await page.getByRole("button", { name: "Batch calls" }).click();
+  await expect(page.getByRole("button", { name: "Create draft" })).toBeEnabled();
+});
