@@ -1,6 +1,6 @@
 export const providerIds = ["gemini"] as const;
 export type ProviderId = (typeof providerIds)[number];
-export type Operation = "imageGenerate" | "imageEdit" | "videoGenerate";
+export type Operation = "imageGenerate" | "videoGenerate";
 export type RunStatus = "running" | "queued" | "success" | "error" | "cancelled" | "uncertain";
 export type Capability = "imageGenerate" | "videoGenerate";
 

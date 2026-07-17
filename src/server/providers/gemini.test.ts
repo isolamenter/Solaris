@@ -18,7 +18,7 @@ describe("Gemini 3.1 image requests", () => {
   it("maps multiple edit references", async () => {
     const imageResponse = JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } }] } }] }); const fetchMock = vi.fn().mockResolvedValue(new Response(imageResponse, { status: 200 })); vi.stubGlobal("fetch", fetchMock);
     const attachments = [{ mimeType: "image/png", base64: "b25l", byteSize: 3 }, { mimeType: "image/jpeg", base64: "dHdv", byteSize: 3 }];
-    const edit = await gemini.operations.imageEdit!(profile, { model: "gemini-3.1-flash-image", prompt: "combine", attachments, parameters });
+    const edit = await gemini.operations.imageGenerate!(profile, { model: "gemini-3.1-flash-image", prompt: "combine", attachments, parameters });
     expect((edit.inspector.request as { attachmentCount: number }).attachmentCount).toBe(2);
     const editRequest = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
     expect(editRequest.contents[0].parts).toHaveLength(3);

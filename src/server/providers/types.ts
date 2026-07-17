@@ -26,7 +26,6 @@ export type ProviderPlugin = {
   testConnection: (profile: ProviderProfile) => Promise<{ detail: string }>;
   operations: {
     imageGenerate?: (profile: ProviderProfile, input: ImageInput) => Promise<ImageResult>;
-    imageEdit?: (profile: ProviderProfile, input: ImageInput) => Promise<ImageResult>;
     videoGenerate?: { submit: (profile: ProviderProfile, input: VideoInput) => Promise<VideoSubmission>; poll: (profile: ProviderProfile, remoteId: string) => Promise<VideoPoll>; cancel?: (profile: ProviderProfile, remoteId: string) => Promise<void> };
   };
 };
