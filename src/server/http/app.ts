@@ -1,3 +1,4 @@
+import { assertMockDeployment, registerMockOidc } from "../auth/mockOidc.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
@@ -20,6 +21,7 @@ import { reportBoundaryRejection, type DeploymentBoundary } from "./security.js"
 export type AppConfig = {
   /** The interface the process listens on, reported by the health route. */
   bindHost: string;
+  mockOidc?: boolean;
 };
 
 /**
@@ -356,10 +358,26 @@ export async function createApp(deps: AppDependencies): Promise<FastifyInstance>
    */
   app.addHook("onRequest", async (request, reply) => {
     const rejection = boundary.rejectionFor(request);
-    if (rejection === null) return;
-    reportBoundaryRejection(request, rejection);
-    return reply.status(rejection.statusCode).send({ error: { code: rejection.code, message: rejection.message } });
+    if (rejection !== null) {
+      reportBoundaryRejection(request, rejection);
+      return reply.status(rejection.statusCode).send({ error: { code: rejection.code, message: rejection.message } });
+    }
+    // Only origins accepted by the deployment boundary receive CORS access.
+    if (request.headers.origin !== undefined) {
+      reply.header("Access-Control-Allow-Origin", request.headers.origin);
+      reply.header("Vary", "Origin");
+      if (request.method === "OPTIONS" && request.headers["access-control-request-method"] !== undefined) {
+        reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+        return reply.status(204).send();
+      }
+    }
   });
+
+  if (config.mockOidc) {
+    assertMockDeployment(boundary.publicOrigin, config.bindHost, boundary.trustProxy);
+    await registerMockOidc(app, boundary.publicOrigin);
+  }
 
   const currentUser = async (request: FastifyRequest): Promise<UserDto> => (await authenticate(request, sessions)).user;
 
@@ -376,7 +394,7 @@ export async function createApp(deps: AppDependencies): Promise<FastifyInstance>
 
   app.get("/api/deployment", async (): Promise<DeploymentDto> => ({
     name: "Solaris",
-    auth: { flow: "desktop-code", authorizationEndpoint: AUTHORIZE_PATH, tokenEndpoint: TOKEN_PATH },
+    auth: { flow: "desktop-code", authorizationEndpoint: AUTHORIZE_PATH, tokenEndpoint: TOKEN_PATH, ...(config.mockOidc ? { autoSignIn: true } : {}) },
   }));
 
   // B03 owns the desktop authorization-code flow, its input schemas and its

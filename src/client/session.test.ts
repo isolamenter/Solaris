@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionDto } from "../shared/contracts.js";
 import type { LocalStore } from "../shared/local.js";
-import { createSessionProvider } from "./session.js";
+import { SolarisApi } from "./api.js";
+import { createSessionProvider, signInSession } from "./session.js";
+
+afterEach(() => vi.restoreAllMocks());
 
 const originA = "http://127.0.0.1:3210";
 const originB = "https://solaris.example.com";
@@ -70,4 +73,19 @@ describe("SessionProvider", () => {
     await expect(provider.persist(session("token-a", "user-a"))).rejects.toThrow(failure);
     await expect(provider.persist(null)).rejects.toThrow(failure);
   });
+});
+
+
+it("uses desktop authorization and exchanges its PKCE verifier before returning a session", async () => {
+  const expected = session("opaque-session", "local-user");
+  const login = { authorize: vi.fn().mockResolvedValue({ code: "one-use-code", codeVerifier: "v".repeat(43) }) };
+  const fetchImpl = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(expected));
+  const api = new SolarisApi({ baseUrl: originA, getToken: () => null });
+  const controller = new AbortController();
+  const result = await signInSession(login, api, { name: "Solaris", auth: { flow: "desktop-code", authorizationEndpoint: "/api/auth/desktop/authorize", tokenEndpoint: "/api/auth/desktop/token", autoSignIn: true } }, controller.signal);
+  expect(result).toEqual(expected);
+  expect(login.authorize).toHaveBeenCalledWith({ authorizationEndpoint: `${originA}/api/auth/desktop/authorize`, signal: controller.signal });
+  const request = fetchImpl.mock.calls[0];
+  expect(request?.[0]).toBe(`${originA}/api/auth/desktop/token`);
+  expect(JSON.parse(String(request?.[1]?.body))).toEqual({ code: "one-use-code", code_verifier: "v".repeat(43) });
 });

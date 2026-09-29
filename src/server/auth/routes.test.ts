@@ -9,6 +9,7 @@ import { parseRedirectAllowlist } from "./redirect.js";
 import { registerAuthRoutes, type AuthRouteDependencies, type UserDirectory } from "./routes.js";
 import { BearerSessionService, type SessionStore } from "./sessions.js";
 import { InMemoryAuthTransactionStore } from "./transactions.js";
+import { buildAuthorizationUrl } from "../../client/local/pkce.js";
 
 const CALLBACK_URL = "https://solaris.example.test/api/auth/callback";
 const REDIRECT_URI = "http://127.0.0.1:8765/callback";
@@ -118,7 +119,12 @@ describe("desktop login routes", () => {
   afterEach(async () => app.close());
 
   const authorize = (redirectUri = REDIRECT_URI) =>
-    app.inject({ method: "GET", url: `/api/auth/desktop/authorize?state=${CLIENT_STATE}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${CHALLENGE}&code_challenge_method=S256` });
+    app.inject({ method: "GET", url: buildAuthorizationUrl({
+      authorizationEndpoint: "https://solaris.example.test/api/auth/desktop/authorize",
+      state: CLIENT_STATE,
+      redirectUri,
+      codeChallenge: CHALLENGE,
+    }) });
 
   const callback = (state: string, code = "idp-code-1") =>
     app.inject({ method: "GET", url: `/api/auth/callback?code=${code}&state=${encodeURIComponent(state)}` });
@@ -126,6 +132,21 @@ describe("desktop login routes", () => {
   const token = (code: string, verifier = VERIFIER) => app.inject({ method: "POST", url: "/api/auth/desktop/token", payload: { code, code_verifier: verifier } });
 
   describe("GET /api/auth/desktop/authorize", () => {
+    it("requires code response type and refuses other flows", async () => {
+      for (const responseType of [null, "token"]) {
+        const url = new URL(buildAuthorizationUrl({
+          authorizationEndpoint: "https://solaris.example.test/api/auth/desktop/authorize",
+          state: CLIENT_STATE, redirectUri: REDIRECT_URI, codeChallenge: CHALLENGE,
+        }));
+        if (responseType === null) url.searchParams.delete("response_type");
+        else url.searchParams.set("response_type", responseType);
+        const response = await app.inject({ method: "GET", url: url.toString() });
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error.code).toBe("VALIDATION");
+      }
+      expect(adapter.transactions).toHaveLength(0);
+    });
+
     it("redirects to the IdP and opens a login transaction bound to the client state, challenge and redirect URI", async () => {
       const response = await authorize();
       expect(response.statusCode).toBe(302);
@@ -147,12 +168,12 @@ describe("desktop login routes", () => {
     });
 
     it("rejects a request that is not S256 or lacks a parameter", async () => {
-      const plain = await app.inject({ method: "GET", url: `/api/auth/desktop/authorize?state=${CLIENT_STATE}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&code_challenge=${CHALLENGE}&code_challenge_method=plain` });
+      const plain = await app.inject({ method: "GET", url: `/api/auth/desktop/authorize?response_type=code&state=${CLIENT_STATE}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&code_challenge=${CHALLENGE}&code_challenge_method=plain` });
       expect(plain.statusCode).toBe(400);
       expect(plain.json().error.code).toBe("VALIDATION");
-      const missing = await app.inject({ method: "GET", url: "/api/auth/desktop/authorize?state=x" });
+      const missing = await app.inject({ method: "GET", url: "/api/auth/desktop/authorize?response_type=code&state=x" });
       expect(missing.statusCode).toBe(400);
-      const extra = await app.inject({ method: "GET", url: `/api/auth/desktop/authorize?state=x&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&code_challenge=${CHALLENGE}&code_challenge_method=S256&prompt=consent` });
+      const extra = await app.inject({ method: "GET", url: `/api/auth/desktop/authorize?response_type=code&state=x&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&code_challenge=${CHALLENGE}&code_challenge_method=S256&prompt=consent` });
       // A strict schema: an unknown parameter is a format failure, not an instruction.
       expect(extra.statusCode).toBe(400);
       expect(adapter.transactions).toHaveLength(0);

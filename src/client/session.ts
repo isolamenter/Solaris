@@ -14,8 +14,9 @@
  * accounts never share one.
  */
 
-import type { SessionDto } from "../shared/contracts.js";
+import type { DeploymentDto, SessionDto } from "../shared/contracts.js";
 import type { DesktopLogin, LocalStore } from "../shared/local.js";
+import type { SolarisApi } from "./api.js";
 import type { ServerSettings } from "./settings.js";
 
 export interface SessionProvider {
@@ -57,3 +58,10 @@ export type AppDependencies = {
    */
   defaultServerOrigin: string | null;
 };
+
+/** Shared manual/startup login; the native store remains the only token store. */
+export async function signInSession(login: DesktopLogin, api: SolarisApi, deployment: DeploymentDto, signal?: AbortSignal): Promise<SessionDto> {
+  const authorizationEndpoint = new URL(deployment.auth.authorizationEndpoint, api.origin).toString();
+  const { code, codeVerifier } = await login.authorize({ authorizationEndpoint, signal });
+  return api.exchangeDesktopCode({ code, codeVerifier });
+}

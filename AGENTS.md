@@ -7,6 +7,7 @@ Canonical instructions for all AI agents. Harness-specific instruction files, if
 Solaris is a Tauri desktop Client plus a self-hostable Fastify Server for synchronous image generation. The Client owns image files; the Server stores metadata and encrypted credentials only.
 
 - [README.md](README.md): setup, environment and developer commands.
+- [DESIGN.md](DESIGN.md): Solaris visual identity and UI constraints; read before UI design changes.
 - [ARCHITECTURE.md](ARCHITECTURE.md): boundaries, module map and data flow; read before architectural work.
 - [docs/specs/](docs/specs/): behavior, API and security invariants; read the relevant specification before changing a feature.
 - [docs/decisions/](docs/decisions/): confirmed architecture decisions and evidence limits.

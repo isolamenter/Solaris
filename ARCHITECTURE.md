@@ -28,6 +28,12 @@ Client and Server depend on `shared`; shared code never depends on either runtim
 
 The Client listens on a random loopback port and opens the Server authorization URL in the system browser with state and S256 PKCE. The Server performs a separate OIDC flow, verifies identity and maps `(issuer, subject)` to a Solaris user. It returns a short-lived, single-use Solaris code to the desktop callback. The Client exchanges that code plus its verifier for a bearer session, which it stores in the OS secure store. The Server stores only the session-token hash. See [identity and connections](docs/specs/identity-and-connections.md).
 
+For explicit local development, `SOLARIS_MOCK_OIDC=1` hosts a mock IdP in the
+same loopback Server and seeds one developer account with an env-provided encrypted
+Gemini key. It uses the same OIDC adapter and desktop transport; the desktop starts
+login automatically if no session is stored. See the identity specification for
+its deployment restrictions and startup behavior.
+
 ### Generate and save
 
 The Client reads selected references, hashes the exact bytes and sends a multipart request with a stable submission ID and digest. The Server authenticates the user, recomputes the digest, checks the dedup receipt, validates new submissions and atomically claims a run. It resolves the connection credential and makes one synchronous provider call. Image bytes remain in memory; SQLite receives run metadata and a dedup receipt. The response distinguishes run outcome from delivery availability. The Client saves delivered bytes atomically and records device-local file status. See [generation](docs/specs/generation.md) and [local data](docs/specs/local-data.md).

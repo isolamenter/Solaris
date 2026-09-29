@@ -73,6 +73,8 @@ export type DeploymentDto = {
     flow: "desktop-code";
     authorizationEndpoint: string;
     tokenEndpoint: string;
+    /** Explicit local mock deployment: sign in once when the desktop opens. */
+    autoSignIn?: boolean;
   };
 };
 

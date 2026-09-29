@@ -79,10 +79,9 @@ export class SolarisService {
     return this.repo.listConnections(userId).map((row) => this.connectionDto(row));
   }
 
-  createConnection(userId: string, input: { name: string; adapterId: ConnectionDto["adapterId"]; baseUrl: string; config?: Record<string, unknown>; apiKey: string }): ConnectionDto {
+  createConnection(userId: string, input: { name: string; adapterId: ConnectionDto["adapterId"]; baseUrl: string; config?: Record<string, unknown>; apiKey: string }, id = randomUUID()): ConnectionDto {
     const plugin = pluginFor(input.adapterId);
     const parsed = plugin.connectionSchema.parse({ baseUrl: input.baseUrl, config: input.config ?? {} });
-    const id = randomUUID();
     const row = this.repo.createConnection({
       userId, id, name: input.name, adapterId: input.adapterId, baseUrl: parsed.baseUrl,
       config: parsed.config ?? {}, keyEncrypted: this.vault.encrypt(input.apiKey, userId, id),

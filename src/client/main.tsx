@@ -6,16 +6,16 @@ import type { AppDependencies } from "./session.js";
 import { createServerSettings, developmentServerOrigin, isDesktopShell } from "./settings.js";
 import "./styles.css";
 
+declare const __SOLARIS_DEFAULT_SERVER__: string | null;
+
 const deps: AppDependencies = {
-  // The account-scoped on-disk store and the native loopback + PKCE login are
-  // task B06's client-local layer; nothing is stubbed in this build.
+  // File operations and session storage always use the real native backend.
   localStore: createLocalStore(),
   desktopLogin: createDesktopLogin(),
   settings: createServerSettings(window.localStorage),
-  // The Server address is configured, not derived. The browser build is served
-  // by the Server itself, so its page origin is only a development default; the
-  // packaged desktop shell gets null here and asks for the address.
-  defaultServerOrigin: developmentServerOrigin(window.location.origin, isDesktopShell(globalThis)),
+  // Mock builds carry an explicit local Server default. Other desktop builds
+  // ask for an address; the served browser page uses its development origin.
+  defaultServerOrigin: __SOLARIS_DEFAULT_SERVER__ ?? developmentServerOrigin(window.location.origin, isDesktopShell(globalThis)),
 };
 
 const container = document.getElementById("root");

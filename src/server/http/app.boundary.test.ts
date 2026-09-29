@@ -91,6 +91,46 @@ describe("the boundary in front of every route", () => {
   });
 });
 
+describe("desktop CORS", () => {
+  beforeEach(async () => {
+    deployment = await createTestDeployment({ boundary: { allowedOrigins: ["tauri://localhost"] } });
+  });
+
+  it("serves deployment and authentication errors to the allowed desktop origin", async () => {
+    for (const [url, status] of [["/api/deployment", 200], ["/api/me", 401]] as const) {
+      const response = await deployment.call({ method: "GET", url, headers: { origin: "tauri://localhost" } });
+      expect(response.statusCode).toBe(status);
+      expect(response.headers["access-control-allow-origin"]).toBe("tauri://localhost");
+      expect(response.headers.vary).toBe("Origin");
+    }
+  });
+
+  it("allows JSON and bearer preflights without granting a session", async () => {
+    const response = await deployment.call({ method: "OPTIONS", url: "/api/auth/desktop/token", headers: {
+      origin: "tauri://localhost",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type,authorization",
+    } });
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("tauri://localhost");
+    expect(response.headers["access-control-allow-methods"]).toContain("POST");
+    expect(response.headers["access-control-allow-headers"]).toBe("Authorization, Content-Type");
+    const account = await deployment.call({ method: "GET", url: "/api/me", headers: { origin: "tauri://localhost" } });
+    expect(account.statusCode).toBe(401);
+  });
+
+  it("rejects unknown origins and hosts before answering preflights", async () => {
+    for (const headers of [
+      { origin: "tauri://attacker", "access-control-request-method": "POST" },
+      { origin: "tauri://localhost", host: "attacker.example", "access-control-request-method": "POST" },
+    ]) {
+      const response = await deployment.call({ method: "OPTIONS", url: "/api/auth/desktop/token", headers });
+      expect([403, 421]).toContain(response.statusCode);
+      expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+    }
+  });
+});
+
 describe("trusted proxy hops", () => {
   afterEach(async () => {
     await deployment.close();

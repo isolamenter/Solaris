@@ -74,7 +74,45 @@ npx tauri dev
 
 Enter `http://127.0.0.1:3210` in the Client, sign in using the system browser, then create a Gemini connection in **Connections**, enter your key and discover models. In **Workspace**, select an adapted model, enter a prompt and optionally select reference files. Choose a local output directory to save delivered images.
 
-The Server also serves the built UI at [http://127.0.0.1:3210](http://127.0.0.1:3210). Full login and file operations require the Tauri shell; this browser page is a development surface.
+The Server also serves the built UI at [http://127.0.0.1:3210](http://127.0.0.1:3210). For the macOS desktop, set `SOLARIS_ALLOWED_ORIGINS=tauri://localhost` so the WebView can call the Server. Full login and file operations require the Tauri shell; this browser page is a development surface.
+
+## Local mock sign-in
+
+For the simplest Tauri development setup, put these values in `.env.local`:
+
+```dotenv
+SOLARIS_PUBLIC_ORIGIN=http://127.0.0.1:3210
+CREDENTIALS_MASTER_KEY=<output of openssl rand -base64 32>
+SOLARIS_AUTH_ADAPTER=oidc
+SOLARIS_CREDENTIAL_SOURCE=user-key
+SOLARIS_MOCK_OIDC=1
+SOLARIS_ALLOWED_ORIGINS=tauri://localhost
+SOLARIS_GEMINI_API_KEY=<your Gemini API key>
+```
+
+Run `npm run dev`, then `npx tauri dev` in another terminal. The desktop build
+uses the configured local Server origin. If no session is stored, it automatically
+opens the system browser once, completes mock authorization without a login form,
+and stores the resulting Solaris session in the native secure store. A failed
+attempt stays on the sign-in screen for manual retry; signing out does not
+immediately sign back in. Existing device Server settings take precedence over
+the build's default; clear or change them if they point to a different Server.
+
+The Server seeds a **Local Gemini** connection and an adapted
+`gemini-3.1-flash-image` model without calling the provider. The key comes from
+Server env and is stored encrypted in the existing credential vault. Server
+restart updates that connection's key and URL; manually editing this connection
+is therefore temporary. Optional `SOLARIS_GEMINI_BASE_URL` and
+`SOLARIS_GEMINI_MODEL` override the defaults. The URL must be HTTPS and the model
+must belong to the existing adapter allowlist. Generation still calls the real
+provider.
+
+Mock mode has one fixed developer identity and requires a loopback public origin,
+loopback bind and no trusted proxy. Use one stable origin per local data directory.
+It is a local development IdP with signed tokens, nonce and PKCE checks, not Muse
+SSO or NewAPI integration. Disable `SOLARIS_MOCK_OIDC` and rebuild the Client to
+return to the configured external OIDC flow. Full file and secure-storage behavior
+still requires Tauri.
 
 ## Configuration
 

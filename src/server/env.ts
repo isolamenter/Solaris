@@ -16,6 +16,13 @@ function readLocalEnv() {
 
 readLocalEnv();
 
+function mockOidcEnabled(): boolean {
+  const value = process.env.SOLARIS_MOCK_OIDC;
+  if (value !== undefined && value !== "0" && value !== "1") throw new Error("SOLARIS_MOCK_OIDC must be 0 or 1");
+  return value === "1";
+}
+
+
 /** A malformed budget must refuse startup, not be silently coerced. */
 function intVar(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -69,6 +76,10 @@ export const env = {
   bindHost: process.env.SOLARIS_BIND_HOST ?? "127.0.0.1",
 
   // -- authentication (B03) --------------------------------------------------
+  mockOidc: mockOidcEnabled(),
+  geminiApiKey: process.env.SOLARIS_GEMINI_API_KEY,
+  geminiBaseUrl: process.env.SOLARIS_GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com",
+  geminiModel: process.env.SOLARIS_GEMINI_MODEL ?? "gemini-3.1-flash-image",
   authAdapter: process.env.SOLARIS_AUTH_ADAPTER,
   credentialSource: process.env.SOLARIS_CREDENTIAL_SOURCE,
   oidcIssuer: process.env.SOLARIS_OIDC_ISSUER,

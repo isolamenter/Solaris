@@ -95,7 +95,7 @@ test("refuses a bearer token that is not a live session", async ({ request }) =>
  * authorize leg cannot produce a redirect. This does not prove a real sign-in.
  */
 test("reaches the real desktop login flow, with strict loopback validation", async ({ request }) => {
-  const valid = "/api/auth/desktop/authorize?state=client-state&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256&redirect_uri=http%3A%2F%2F127.0.0.1%3A45678%2Fcallback";
+  const valid = "/api/auth/desktop/authorize?response_type=code&state=client-state&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256&redirect_uri=http%3A%2F%2F127.0.0.1%3A45678%2Fcallback";
   const unreachableIdp = await request.get(valid, { maxRedirects: 0 });
   expect(unreachableIdp.status()).toBe(400);
   expect((await unreachableIdp.json()).error.code).toBe("AUTH_FLOW_INVALID");

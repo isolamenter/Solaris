@@ -7,15 +7,15 @@ import { ServicesContext, type Services } from "./context.js";
 import { describeError, isAuthRequired } from "./display.js";
 import { History } from "./History.js";
 import { ServerAddress } from "./ServerAddress.js";
-import { createSessionProvider, type AppDependencies } from "./session.js";
+import { createSessionProvider, signInSession, type AppDependencies } from "./session.js";
 import { Workspace } from "./Workspace.js";
 
 type Page = "workspace" | "connections" | "history";
 
-const navigation: { id: Page; label: string; index: string }[] = [
-  { id: "workspace", label: "Workspace", index: "01" },
-  { id: "connections", label: "Connections", index: "02" },
-  { id: "history", label: "Run history", index: "03" },
+const navigation: { id: Page; label: string }[] = [
+  { id: "workspace", label: "Workspace" },
+  { id: "connections", label: "Connections" },
+  { id: "history", label: "Run history" },
 ];
 
 /** What this device says about the Server address before anything else runs. */
@@ -112,21 +112,36 @@ function ServerApp({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    const controller = new AbortController();
     let active = true;
-    void sessionProvider
-      .restore()
-      .then((restored) => {
-        if (active) setSession(restored);
-      })
-      .catch((error: unknown) => {
+    void (async () => {
+      try {
+        const restored = await sessionProvider.restore();
         if (!active) return;
-        setNotice(`The stored session could not be read: ${describeError(error)}`);
-        setSession(null);
-      });
+        setBusy(restored === null);
+        setSession(restored);
+        if (restored === null) {
+          const deployment = await new SolarisApi({ baseUrl: origin, getToken: () => null }).getDeployment();
+          if (!active || !deployment.auth.autoSignIn) return;
+          const next = await signInSession(deps.desktopLogin, new SolarisApi({ baseUrl: origin, getToken: () => null }), deployment, controller.signal);
+          if (!active) return;
+          await sessionProvider.persist(next);
+          if (active) setSession(next);
+        }
+      } catch (error) {
+        if (active) {
+          setNotice(`Startup sign-in failed: ${describeError(error)}`);
+          setSession(null);
+        }
+      } finally {
+        if (active) setBusy(false);
+      }
+    })();
     return () => {
       active = false;
+      controller.abort();
     };
-  }, [sessionProvider]);
+  }, [sessionProvider, origin, deps.desktopLogin]);
 
   const api = useMemo(
     () => new SolarisApi({ baseUrl: origin, getToken: () => session?.token ?? null }),
@@ -155,10 +170,7 @@ function ServerApp({
     setNotice("");
     try {
       const deployment = await api.getDeployment();
-      const { code, codeVerifier } = await deps.desktopLogin.authorize({
-        authorizationEndpoint: deployment.auth.authorizationEndpoint,
-      });
-      const next = await api.exchangeDesktopCode({ code, codeVerifier });
+      const next = await signInSession(deps.desktopLogin, api, deployment);
       // The session counts as active only once the device has stored it.
       await sessionProvider.persist(next);
       setSession(next);
@@ -300,12 +312,10 @@ function Shell({
       <main className="shell">
         <aside className="sidebar">
           <div className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              <i />
-            </span>
+            <span className="brand-mark" aria-hidden="true" />
             <div>
               <h1>Solaris</h1>
-              <p>Single-image workspace</p>
+              <p>Local-image workspace</p>
             </div>
           </div>
           <nav aria-label="Primary navigation">
@@ -316,14 +326,10 @@ function Shell({
                 onClick={() => setPage(item.id)}
                 key={item.id}
               >
-                <span>{item.index}</span>
                 {item.label}
               </button>
             ))}
           </nav>
-          <div className="solar-rail" aria-hidden="true">
-            <span className="solar-orb" />
-          </div>
           <div className="local-state">
             <span className="pulse" />
             <div>
@@ -335,7 +341,7 @@ function Shell({
         <div className="workspace">
           <header className="topbar">
             <div>
-              <span className="eyebrow">{current?.index} / SOLARIS</span>
+              <span className="eyebrow">{current?.label}</span>
               <p>
                 {catalog.connections.length} connection{catalog.connections.length === 1 ? "" : "s"} · {usableModels} usable
                 model{usableModels === 1 ? "" : "s"}
@@ -389,12 +395,10 @@ function Shell({
 function Brand() {
   return (
     <div className="brand brand-plain">
-      <span className="brand-mark" aria-hidden="true">
-        <i />
-      </span>
+      <span className="brand-mark" aria-hidden="true" />
       <div>
         <h1>Solaris</h1>
-        <p>Single-image workspace</p>
+        <p>Local-image workspace</p>
       </div>
     </div>
   );

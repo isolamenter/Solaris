@@ -22,6 +22,7 @@ export const TOKEN_PATH = "/api/auth/desktop/token";
  * typo silently ignores.
  */
 export const authorizeQuerySchema = z.strictObject({
+  response_type: z.literal("code"),
   state: z.string().min(1).max(200),
   redirect_uri: z.string().min(1).max(2000),
   code_challenge: z.string().min(43).max(128),

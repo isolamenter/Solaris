@@ -1,3 +1,5 @@
+import { assertMockDeployment, MOCK_CLIENT_ID, MOCK_CLIENT_SECRET } from "./auth/mockOidc.js";
+import { configureLocalAccount } from "./auth/localSetup.js";
 import { createAuthBoundaries, CALLBACK_PATH } from "./auth/index.js";
 import { AesCredentialVault, createCredentialSource } from "./credentials/index.js";
 import { openDatabase } from "./db/index.js";
@@ -39,18 +41,26 @@ export async function start(): Promise<void> {
   // call has a fallback: an unconfigured boundary or an unsupported auth adapter
   // refuses startup instead of serving unprotected.
   const boundary = deploymentBoundary({ publicOrigin: env.publicOrigin, allowedOrigins: env.allowedOrigins, trustProxy: env.trustProxy });
+  if (env.mockOidc) assertMockDeployment(boundary.publicOrigin, env.bindHost, boundary.trustProxy);
   const key = masterKey();
   const vault = new AesCredentialVault(key);
   const auth = createAuthBoundaries(repository, {
     adapter: env.authAdapter,
     sessionTtlSeconds: env.sessionTtlSeconds,
     desktopRedirectAllowlist: env.desktopRedirectAllowlist,
-    oidc: { issuer: env.oidcIssuer, clientId: env.oidcClientId, clientSecret: env.oidcClientSecret, scopes: env.oidcScopes },
+    oidc: env.mockOidc
+      ? { issuer: `${boundary.publicOrigin}/mock-oidc`, clientId: MOCK_CLIENT_ID, clientSecret: MOCK_CLIENT_SECRET, scopes: ["openid", "profile"] }
+      : { issuer: env.oidcIssuer, clientId: env.oidcClientId, clientSecret: env.oidcClientSecret, scopes: env.oidcScopes },
   });
   const credentials = createCredentialSource(env.credentialSource, repository, vault);
 
   const cache = new ResultCache(env.resultCacheTtlSeconds * 1000, env.resultCacheMaxBytes);
   const service = new SolarisService(repository, credentials, vault, cache, { imageResultMaxBytes: env.imageResultMaxBytes });
+
+  if (env.mockOidc) {
+    if (env.credentialSource !== "user-key") throw new Error("Local mock setup requires SOLARIS_CREDENTIAL_SOURCE=user-key");
+    await configureLocalAccount(repository, service, { publicOrigin: boundary.publicOrigin, apiKey: env.geminiApiKey, baseUrl: env.geminiBaseUrl, model: env.geminiModel });
+  }
 
   // One process owns the data directory, so no `running` row can still be in
   // flight here. They become `uncertain` before the first request is accepted,
@@ -66,7 +76,7 @@ export async function start(): Promise<void> {
     // The IdP must be registered with exactly this value; it is derived from the
     // public origin so it cannot disagree with the host the Server is served at.
     callbackUrl: `${boundary.publicOrigin}${CALLBACK_PATH}`,
-    config: { bindHost: env.bindHost },
+    config: { bindHost: env.bindHost, mockOidc: env.mockOidc },
   });
 
   // Periodic sweep for rows a mid-request crash left `running`. In-flight calls
