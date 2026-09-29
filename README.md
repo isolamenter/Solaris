@@ -1,188 +1,134 @@
 # Solaris
 
-A local-first playground for generating images and videos with AI providers. Solaris combines a React interface with a Fastify backend, keeps application data on your machine, and currently includes a Google Gemini provider integration.
+A desktop workspace for AI image generation and editing, with a self-hostable Server. The Tauri Client keeps image files on your device; the Server authenticates users, stores account and run metadata, and forwards synchronous image requests through the Gemini adapter. The Server never persists images.
 
-> Solaris is under active development. Provider APIs can change, and generated media may incur charges from the configured provider.
+Solaris is under active development. Model requests may incur provider charges.
 
 ## Features
 
-- **Local-first operation** — the server binds only to `127.0.0.1`, with run history and configuration stored locally in SQLite.
-- **Encrypted credentials** — provider API keys are encrypted at rest with AES-256-GCM and are never returned by the API.
-- **Image generation and editing** — create images from prompts or attach supported reference images.
-- **Model-specific controls** — Solaris exposes only the parameters supported by each adapted model.
-- **Asynchronous video runs** — video submissions are queued and polled without blocking the UI.
-- **Provider discovery** — discover compatible Gemini models or add model records manually.
-- **Run archive** — inspect redacted request metadata, export runs as cURL, cancel active runs, and delete history.
-- **Security boundaries** — same-origin checks, HTTPS-only provider URLs, upload limits, and inspector redaction are enforced by the server.
+- Generate images from prompts, optionally with reference images.
+- Configure per-user connections with encrypted, write-only API keys.
+- Discover candidate models or add them manually; only explicitly adapted models can run.
+- View remote run history and track files saved on this device separately.
+- Replay the same submission without another upstream call, with best-effort image delivery from a temporary memory cache.
+
+The current scope is synchronous single-request image generation. Video, Batch, upstream job polling and cancellation are outside the scope.
 
 ## Tech Stack
 
 | Area | Technology |
 | --- | --- |
-| Client | React 19, Vite, TypeScript |
-| Server | Fastify 5, TypeScript |
-| Validation | Zod |
-| Persistence | SQLite, Drizzle ORM |
-| Unit tests | Vitest |
-| End-to-end tests | Playwright |
-| Linting | ESLint |
+| Desktop | Tauri v2, Rust; macOS first |
+| Client | React 19, Vite 7, strict TypeScript |
+| Server | Fastify 5, TypeScript, Zod |
+| Server persistence | SQLite through better-sqlite3 and raw SQL |
+| Client persistence | Scoped JSON records, local image files, OS secure storage |
+| Checks | Vitest, Playwright, ESLint, TypeScript |
 
 ## Requirements
 
-- **Node.js 20.19 or newer**
-- npm
-- A Google Gemini API key for provider requests
+- Node.js **20.19 or newer**, npm.
+- For desktop development: Rust/Cargo (crate minimum Rust 1.77) and the native Tauri build prerequisites. On macOS, install Xcode Command Line Tools with `xcode-select --install`.
+- An OIDC identity provider and a registered Server client for sign-in.
+- A model-service API key and HTTPS endpoint implementing the Gemini protocol for generation.
+
+The current desktop bundle targets macOS (`app` and `dmg`). Windows secure storage is configured, but a Windows release is not established; Linux secure storage is not configured.
 
 ## Quick Start
 
-1. Clone the repository and enter the project directory:
+```shell
+git clone https://github.com/isolamenter/Solaris.git
+cd Solaris
+npm ci
+cp .env.example .env.local
+openssl rand -base64 32
+```
 
-    ````shell
-    git clone <repository-url>
-    cd Solaris
-    ````
+Edit `.env.local`, replacing the placeholders:
 
-2. Install dependencies:
+| Variable | Local development value |
+| --- | --- |
+| `SOLARIS_PUBLIC_ORIGIN` | `http://127.0.0.1:3210` |
+| `CREDENTIALS_MASTER_KEY` | The generated base64-encoded 32-byte key |
+| `SOLARIS_AUTH_ADAPTER` | `oidc` |
+| `SOLARIS_OIDC_ISSUER` | Your IdP issuer URL |
+| `SOLARIS_OIDC_CLIENT_ID` | Your registered Server client ID |
+| `SOLARIS_OIDC_CLIENT_SECRET` | Your Server client secret |
+| `SOLARIS_CREDENTIAL_SOURCE` | `user-key` |
 
-    ````shell
-    npm install
-    ````
+Register `http://127.0.0.1:3210/api/auth/callback` as the Server client's redirect URI at the IdP. For a remote deployment, use `${SOLARIS_PUBLIC_ORIGIN}/api/auth/callback` instead. The desktop's random loopback callback is a separate leg managed by Solaris.
 
-3. Create the local environment file:
+Keep the master key stable: losing or replacing it makes existing saved model credentials unreadable. Keep `.env.local`, keys and local data out of Git.
 
-    ````shell
-    cp .env.example .env.local
-    ````
+Start the Server:
 
-4. Generate a 32-byte encryption key and add it to `.env.local`:
+```shell
+npm run dev
+```
 
-    ````shell
-    openssl rand -base64 32
-    ````
+In another terminal, start the desktop Client:
 
-    Your file should resemble:
+```shell
+npx tauri dev
+```
 
-    ````dotenv
-    CREDENTIALS_MASTER_KEY=<generated-base64-key>
-    SOLARIS_DATA_DIR=.solaris-data
-    PORT=3210
-    ````
+Enter `http://127.0.0.1:3210` in the Client, sign in using the system browser, then create a Gemini connection in **Connections**, enter your key and discover models. In **Workspace**, select an adapted model, enter a prompt and optionally select reference files. Choose a local output directory to save delivered images.
 
-    Keep this key stable. Existing encrypted provider credentials cannot be decrypted if it is lost or changed.
-
-5. Build the client and start Solaris:
-
-    ````shell
-    npm run dev
-    ````
-
-6. Open [http://127.0.0.1:3210](http://127.0.0.1:3210), create a Gemini connection, and enter your provider API key.
+The Server also serves the built UI at [http://127.0.0.1:3210](http://127.0.0.1:3210). Full login and file operations require the Tauri shell; this browser page is a development surface.
 
 ## Configuration
 
-Solaris reads `.env.local` during server initialization.
+The Server reads `.env.local` from the working directory at startup; exported environment variables take precedence. See [.env.example](.env.example) for the complete configuration, including upload-independent upstream budgets and delivery-cache limits.
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `CREDENTIALS_MASTER_KEY` | For saved connections | — | Base64-encoded 32-byte key used to encrypt provider credentials. |
-| `SOLARIS_DATA_DIR` | No | `.solaris-data` | Directory containing the SQLite database and local assets. |
-| `PORT` | No | `3210` | Local HTTP port. The server always binds to `127.0.0.1`. |
+The default bind address is `127.0.0.1`, port `3210`, and data directory `.solaris-data`. One Server process owns each data directory. Pre-refactor databases are refused; select a fresh directory rather than expecting migration.
 
-Do not commit `.env.local`, local data directories, API keys, or generated credentials.
+For a remote Server, configure an HTTPS public origin and TLS proxy or tunnel. Set `SOLARIS_TRUST_PROXY` to the actual trusted proxy hop count. `SOLARIS_ALLOWED_ORIGINS` adds exact origins when needed; Host and Origin checks remain enforced alongside bearer authentication.
 
-## Usage
-
-1. Open **Connections** and create a Google Gemini connection.
-2. Test the connection, then discover compatible models or add one manually.
-3. Open **Workspace**, select a connection and an adapted model, then enter a prompt.
-4. Add reference images when the selected model supports them.
-5. Review generated media and redacted inspector data.
-6. Use **Run archive** to inspect, cancel, export, or delete runs.
-
-Solaris currently adapts selected Gemini image model families and Gemini Veo-style video models. A discovered model may appear unavailable until an explicit adapter is implemented for it.
-
-## Available Commands
+## Development and Checks
 
 | Command | Description |
 | --- | --- |
-| `npm run dev` | Build the client, then start the production-mode local server. |
-| `npm run build` | Build the Vite client into `dist/client`. |
-| `npm start` | Start the server using an existing client build. |
-| `npm test` | Run Vitest unit tests. |
-| `npm run test:watch` | Run unit tests in watch mode. |
-| `npm run test:e2e` | Run Playwright end-to-end tests. |
+| `npm run dev` | Build the Client, then start the Server with `NODE_ENV=production`; no hot reload. |
+| `npm run build` | Build the Vite Client into `dist/client`. |
+| `npm start` | Start the Server with an existing Client build. |
+| `npx tauri dev` | Build the Client and launch the native desktop shell. |
+| `npx tauri build` | Build the configured desktop bundles. |
+| `npm test` / `npm run test:watch` | Run Vitest unit tests once / in watch mode. |
+| `npm run test:e2e` | Run Playwright deployment-boundary tests. |
 | `npm run typecheck` | Type-check without emitting files. |
 | `npm run lint` | Run ESLint. |
-| `npm run smoke` | Check the health endpoint of a running server. |
+| `npm run smoke` | Check health, Host/Origin rejection and unauthenticated API rejection on a running Server. |
+| `cd src-tauri && cargo check` | Check the Rust desktop shell. |
 
-`npm start` requires `dist/client/index.html`; run `npm run build` first. Although named `dev`, `npm run dev` builds the client and starts the server with `NODE_ENV=production`.
+`npm start` requires `dist/client/index.html`; build first. The smoke script reads exported variables, not `.env.local`; for a remote Server, run `SOLARIS_PUBLIC_ORIGIN=https://your-server.example npm run smoke`.
 
-## Architecture
+For code changes, run the relevant unit tests, then type checking and linting; native changes also need `cargo check`. Playwright currently exercises HTTP deployment boundaries with an unreachable test IdP. Neither these tests nor a Vite build prove a signed-in desktop flow, real model generation, billing or cross-platform behavior.
 
-````text
-src/
-├── client/                 React UI and typed API client
-├── server/
-│   ├── db/                 SQLite setup and schema
-│   ├── http/               Fastify app, routes, and security checks
-│   ├── providers/          Provider plugins and adapters
-│   ├── repository.ts       Persistence and DTO mapping
-│   ├── runner.ts           Asynchronous video submission and polling
-│   ├── services.ts         Domain validation and orchestration
-│   └── vault.ts            Credential encryption and redaction
-└── shared/
-    └── contracts.ts        Shared client/server API contracts
-````
+## Project Structure and Documentation
 
-The Vite client is built into `dist/client`, which Fastify serves alongside the API. Provider-specific behavior is isolated behind the provider plugin interface.
+```text
+src/client/       React UI, typed API client and device-local logic
+src/server/       HTTP, authentication, credentials, providers and SQLite
+src/shared/       Public DTOs, digest and local-device interfaces
+src-tauri/        Native shell, secure storage, dialogs and file operations
+e2e/             Deployment-boundary tests
+scripts/         Running-server smoke check
+docs/specs/      Maintained feature behavior and constraints
+docs/decisions/  Confirmed architecture choices and evidence
+```
 
-## Development
+- [ARCHITECTURE.md](ARCHITECTURE.md): module responsibilities, dependency direction and data flow.
+- [Generation](docs/specs/generation.md), [identity and connections](docs/specs/identity-and-connections.md), [device-local data](docs/specs/local-data.md): maintained feature specifications.
+- [Architecture decisions](docs/decisions/architecture-decisions.md): confirmed choices and known evidence limits.
+- [AGENTS.md](AGENTS.md): canonical instructions for AI coding agents.
 
-Before submitting changes, run the narrowest relevant tests followed by the full static checks:
-
-````shell
-npm test
-npm run typecheck
-npm run lint
-````
-
-For browser-level behavior:
-
-````shell
-npm run test:e2e
-````
-
-When adding a provider:
-
-- Implement the provider plugin and adapter under `src/server/providers/`.
-- Register the provider in `src/server/providers/index.ts`.
-- Update the closed provider ID and capability contracts in `src/shared/contracts.ts`.
-- Add focused tests for provider requests, responses, validation, and security behavior.
-
-## Security
-
-Solaris is designed for single-user, local execution—not public network deployment.
-
-- It binds only to the loopback interface.
-- Mutating requests require an exact same origin.
-- Provider base URLs must use HTTPS and cannot include credentials, query strings, or fragments.
-- Provider credentials are encrypted with AES-256-GCM using the profile ID as authenticated data.
-- Request and response inspectors are redacted before persistence.
-- Asset MIME types, individual file sizes, total upload sizes, and multipart limits are validated.
-
-Please report suspected vulnerabilities privately to the project maintainers rather than opening a public issue containing exploit details or credentials.
+The Git-ignored `.docs/` directory contains historical refactor research and backlogs, including candidate contracts and superseded descriptions. Maintained project documentation lives at the paths above and does not require `.docs/` to be present in a fresh checkout.
 
 ## Contributing
 
-Contributions are welcome.
+Open an issue to discuss substantial changes, keep pull requests focused, and describe the behavior change and verification performed. Keep Client/Server contracts synchronized and preserve the image-ownership and credential boundaries described in the architecture and feature specifications.
 
-1. Open an issue to discuss substantial changes.
-2. Fork the repository and create a focused branch.
-3. Add or update tests with the implementation.
-4. Run unit tests, type checking, linting, and relevant end-to-end tests.
-5. Submit a pull request describing the motivation, implementation, and verification steps.
-
-Keep client/server contracts synchronized, preserve local security boundaries, and avoid introducing provider-specific behavior outside the provider plugin layer.
+Report suspected vulnerabilities privately to the maintainers; do not include credentials or private image data in public issues.
 
 ## License
 
