@@ -1,44 +1,85 @@
-import { z } from "zod";
-import type { Capability, ModelOperationConfigDto, ProviderId } from "../../shared/contracts.js";
+/**
+ * Model-service adapter boundary — CONTRACTS §7.
+ *
+ * Owned by B01; implemented by B04. The adapter is the only place that speaks a
+ * model service's protocol. It never persists images, never manages Solaris
+ * sessions or local files, and never decides login state.
+ *
+ * Video and Batch are removed (D5/D15) with no placeholders.
+ */
+
+import type { z } from "zod";
+import type { AdapterId, ErrorCode, ModelOperationConfigDto, Operation, ParameterValues } from "../../shared/contracts.js";
+import type { ResolvedCredential } from "../interfaces.js";
 
 export type Attachment = { mimeType: string; base64: string; byteSize: number };
-export type OperationParameters = Record<string, string | number | boolean>;
-export type ImageInput = { model: string; prompt: string; size?: string; attachments?: Attachment[]; parameters?: OperationParameters };
-export type VideoInput = { model: string; prompt: string; durationSeconds?: number; size?: string };
-export type ImageResult = { assets: { bytes: Buffer; mimeType: string }[]; inspector: Record<string, unknown> };
-export type VideoSubmission = { remoteId: string; inspector: Record<string, unknown> };
-export type VideoPoll = { state: "pending" | "success" | "error"; assets?: { bytes: Buffer; mimeType: string }[]; error?: string; inspector: Record<string, unknown> };
 
-export type BatchInlineRequest = { key: string; request: Record<string, unknown> };
-export type BatchSubmitInput = { model: string; requests: BatchInlineRequest[]; displayName?: string };
-export type BatchSubmitResult = { remoteId: string; totalCount: number; inspector: Record<string, unknown> };
-export type BatchPollState = "submitting" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
-export type BatchPollResult = { state: BatchPollState; responseFile?: string; error?: string; inspector: Record<string, unknown> };
-export type BatchEntryResult = { key?: string; response?: Record<string, unknown>; error?: { code?: number; message?: string; status?: string } };
+export type ImageInput = {
+  model: string;
+  prompt: string;
+  attachments?: Attachment[];
+  parameters?: ParameterValues;
+};
 
-export type ProviderProfile = { id: string; pluginId: ProviderId; baseUrl: string; config: Record<string, unknown>; apiKey: string };
-export type DiscoveredModel = { providerModelId: string; label?: string; capabilities: Capability[] };
 export type ProviderModelOperationConfig = {
   dto: ModelOperationConfigDto;
-  parseParameters: (value: unknown) => OperationParameters;
+  parseParameters: (value: unknown) => ParameterValues;
 };
+
+export type DiscoveredModel = { providerModelId: string; label?: string; capabilities: Operation[] };
+
+/** Everything an adapter needs. The credential is already resolved and owned. */
+export type ProviderConnection = {
+  id: string;
+  adapterId: AdapterId;
+  baseUrl: string;
+  config: Record<string, unknown>;
+  credential: ResolvedCredential;
+};
+
+export type ImageResult = {
+  images: { bytes: Buffer; mimeType: string }[];
+  /** How many images upstream returned, before Solaris applied any retention rule. */
+  returnedImageCount: number;
+  /** Safe whitelist only: duration and counts. Never the raw request/response. */
+  diagnostics: { durationMs: number; returnedImageCount: number };
+};
+
+/**
+ * How a failed upstream call is classified. `rejected` means the upstream
+ * verifiably refused the request; `unknown` means the request may have been
+ * accepted — a generation POST must never be retried automatically on
+ * `unknown`.
+ */
+export type ProviderCallOutcome = "rejected" | "unknown";
+
+/**
+ * Carries only a frozen public error code and a publicly safe message. Raw
+ * bodies, query-string keys, redirect targets and the original exception must
+ * not be attached.
+ */
+export class ProviderCallError extends Error {
+  constructor(
+    readonly outcome: ProviderCallOutcome,
+    readonly errorCode: Extract<ErrorCode, "UPSTREAM_FAILED" | "UPSTREAM_NO_IMAGE" | "UPSTREAM_UNAVAILABLE" | "RESULT_TOO_LARGE">,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ProviderCallError";
+  }
+}
+
 export type ProviderPlugin = {
-  id: ProviderId;
+  id: AdapterId;
   label: string;
-  profileSchema: z.ZodType<{ baseUrl: string; config?: Record<string, unknown> }>;
+  connectionSchema: z.ZodType<{ baseUrl: string; config?: Record<string, unknown> }>;
   fields: { name: string; label: string; type: "url" | "text" | "number"; placeholder?: string; required?: boolean }[];
-  discoverModels?: (profile: ProviderProfile) => Promise<DiscoveredModel[]>;
+  discoverModels?: (connection: ProviderConnection) => Promise<DiscoveredModel[]>;
+  /** Curated allowlist. A model-name filter only narrows candidates. */
   modelAvailability?: (providerModelId: string) => { adapted: boolean; message?: string };
-  modelOperationConfig?: (providerModelId: string, operation: Capability) => ProviderModelOperationConfig | undefined;
-  testConnection: (profile: ProviderProfile) => Promise<{ detail: string }>;
+  modelOperationConfig?: (providerModelId: string, operation: Operation) => ProviderModelOperationConfig | undefined;
+  testConnection: (connection: ProviderConnection) => Promise<{ detail: string }>;
   operations: {
-    imageGenerate?: (profile: ProviderProfile, input: ImageInput) => Promise<ImageResult>;
-    videoGenerate?: { submit: (profile: ProviderProfile, input: VideoInput) => Promise<VideoSubmission>; poll: (profile: ProviderProfile, remoteId: string) => Promise<VideoPoll>; cancel?: (profile: ProviderProfile, remoteId: string) => Promise<void> };
-    batchGenerate?: {
-      submit: (profile: ProviderProfile, input: BatchSubmitInput) => Promise<BatchSubmitResult>;
-      poll: (profile: ProviderProfile, remoteId: string) => Promise<BatchPollResult>;
-      cancel?: (profile: ProviderProfile, remoteId: string) => Promise<void>;
-      download: (profile: ProviderProfile, fileName: string) => Promise<BatchEntryResult[]>;
-    };
+    imageGenerate?: (connection: ProviderConnection, input: ImageInput) => Promise<ImageResult>;
   };
 };

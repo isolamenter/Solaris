@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Main window of the Solaris desktop shell. Only core commands are granted; every Solaris capability is an application command with its own validation.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,211 +1,352 @@
 import { randomUUID } from "node:crypto";
-import type { AssetStore } from "./assets.js";
-import { AppError, toAppError } from "./errors.js";
-import { env } from "./env.js";
-import { configuredModel, pluginFor } from "./providers/index.js";
-import { normalizeBaseUrl } from "./providers/http.js";
-import { adaptGeminiOutput, geminiBatchRequest } from "./providers/geminiAdapter.js";
-import type { Attachment, BatchInlineRequest, OperationParameters, ProviderModelOperationConfig, ProviderPlugin, ProviderProfile } from "./providers/types.js";
-import type { Repository } from "./repository.js";
-import { decryptSecret, encryptSecret, redact } from "./vault.js";
-import type { AttachmentPolicyDto, BatchEntryDto, BatchJobDto, BatchJobStatus, Capability, ModelDto, Operation, ProviderId } from "../shared/contracts.js";
+import { AppError } from "./errors.js";
+import { contentDigest, sha256Hex, type DigestReference } from "../shared/digest.js";
+import type {
+  AdapterDto, AdapterId, ConnectionDto, ConnectionTestDto, GeneratedImageDto, GenerationResponseDto, GenerationResultDto,
+  ModelDto, Operation, ParameterValues, RunDto, RunImageRefDto, RunPageDto, RunStatus,
+} from "../shared/contracts.js";
+import type { ConnectionRow, CredentialSource, CredentialVault, ModelRow, ReceiptRow, Repository, RunRow } from "./interfaces.js";
+import { adapterDtos, configuredModel, pluginFor } from "./providers/index.js";
+import type { ProviderConnection } from "./providers/types.js";
+import { ProviderCallError } from "./providers/types.js";
+import type { ResultCache } from "./resultCache.js";
+
+export type ReferenceInput = { mimeType: string; bytes: Buffer };
+
+export type GenerateInput = {
+  connectionId: string;
+  modelId: string;
+  prompt: string;
+  parameters?: ParameterValues;
+  submissionId: string;
+  contentDigest: string;
+  references: ReferenceInput[];
+};
+
+export type ServiceConfig = {
+  /** Delivery budget for one response (CONTRACTS §4.2). */
+  imageResultMaxBytes: number;
+};
+
+const toRunDto = (row: RunRow): RunDto => ({
+  id: row.id, connectionId: row.connectionId, connectionName: row.connectionName, modelId: row.modelId,
+  providerModelId: row.providerModelId, operation: row.operation, status: row.status, prompt: row.prompt,
+  parameters: row.parameters, referenceCount: row.referenceCount, returnedImageCount: row.returnedImageCount,
+  retainedImageCount: row.retainedImageCount, images: row.images, error: row.error,
+  createdAt: row.createdAt, updatedAt: row.updatedAt,
+});
 
 export class SolarisService {
-  constructor(private readonly repo: Repository, private readonly assets: AssetStore) {}
-  providerProfile(profileId: string): ProviderProfile {
-    const row = this.repo.getProfileRaw(profileId); const pluginId = row.plugin_id; return { id: row.id, pluginId, baseUrl: row.base_url, config: JSON.parse(row.config_json) as Record<string, unknown>, apiKey: decryptSecret(row.key_encrypted, row.id, env.masterKey) };
-  }
-  private assertModel(profileId: string, modelId: string, operation: Operation) {
-    const profile = this.repo.getProfile(profileId); if (!profile.enabled) throw new AppError("PROFILE_DISABLED", "Connection is disabled", 409);
-    const model = this.configured(this.repo.getModelForProfile(profileId, modelId));
-    if (!model.adapted) throw new AppError("MODEL_NOT_ADAPTED", model.availabilityMessage ?? "This model is not adapted for Solaris and cannot be used", 400);
-    if (!model.enabled || !model.capabilities.includes(operation as Capability)) throw new AppError("OPERATION_UNAVAILABLE", "This model has not been enabled for this operation", 400);
-    return model;
-  }
-  private configured(model: ModelDto) { return configuredModel(model, this.repo.getProfile(model.profileId).pluginId); }
-  listModels(profileId: string) { return this.repo.listModels(profileId).map((model) => this.configured(model)); }
-  private operationConfig(profileId: string, model: ModelDto, operation: Capability): ProviderModelOperationConfig | undefined { return pluginFor(this.repo.getProfile(profileId).pluginId).modelOperationConfig?.(model.providerModelId, operation); }
-  private parameters(profileId: string, model: ModelDto, operation: Capability, value: unknown): OperationParameters {
-    const config = this.operationConfig(profileId, model, operation);
-    if (config) return config.parseParameters(value ?? {});
-    if (value && typeof value === "object" && Object.keys(value).length) throw new AppError("PARAMETERS_UNAVAILABLE", "This model does not expose configurable parameters for this operation", 400);
-    return {};
-  }
-  private attachments(ids: string[] | undefined): Attachment[] { return (ids ?? []).map((id) => { const file = this.assets.read(id); return { mimeType: file.row.mime_type, base64: file.bytes.toString("base64"), byteSize: file.bytes.byteLength }; }); }
-  private validatedAttachments(ids: string[] | undefined, policy?: AttachmentPolicyDto) {
-    const attachments = this.attachments(ids);
-    if (!policy) return attachments;
-    if (attachments.length > policy.maxCount) throw new AppError("ASSET_COUNT", `This model accepts at most ${policy.maxCount} reference images`, 400);
-    const invalid = attachments.find((attachment) => !policy.accept.includes(attachment.mimeType));
-    if (invalid) throw new AppError("ASSET_TYPE", `Reference images must be ${policy.accept.map((type) => type.replace("image/", "").toUpperCase()).join(", ")}`, 415);
-    const oversized = attachments.find((attachment) => attachment.byteSize > policy.maxFileBytes);
-    if (oversized) throw new AppError("ASSET_SIZE", `Each reference image must be ${Math.floor(policy.maxFileBytes / 1024 / 1024)} MB or smaller`, 413);
-    const total = attachments.reduce((sum, attachment) => sum + attachment.byteSize, 0);
-    if (total > policy.maxTotalBytes) throw new AppError("ASSET_TOTAL_SIZE", `Reference images must total ${Math.floor(policy.maxTotalBytes / 1024 / 1024)} MB or less`, 413);
-    return attachments;
-  }
-  createProfile(input: { name: string; pluginId: ProviderId; baseUrl: string; config?: Record<string, unknown>; apiKey: string }) {
-    const plugin = pluginFor(input.pluginId); const parsed = plugin.profileSchema.parse({ baseUrl: input.baseUrl, config: input.config ?? {} }); const id = randomUUID();
-    return this.repo.createProfile({ id, name: input.name.trim(), pluginId: input.pluginId, baseUrl: normalizeBaseUrl(parsed.baseUrl), config: parsed.config ?? {}, keyEncrypted: encryptSecret(input.apiKey, id, env.masterKey) });
-  }
-  updateProfile(id: string, input: { name: string; baseUrl: string; config?: Record<string, unknown>; enabled: boolean; apiKey?: string }) { const current = this.repo.getProfile(id); const parsed = pluginFor(current.pluginId).profileSchema.parse({ baseUrl: input.baseUrl, config: input.config ?? {} }); return this.repo.updateProfile(id, { name: input.name.trim(), baseUrl: normalizeBaseUrl(parsed.baseUrl), config: parsed.config ?? {}, enabled: input.enabled, keyEncrypted: input.apiKey ? encryptSecret(input.apiKey, id, env.masterKey) : undefined }); }
-  async testProfile(id: string) { try { const result = await pluginFor(this.repo.getProfile(id).pluginId).testConnection(this.providerProfile(id)); return this.repo.setProfileTest(id, { ok: true, at: new Date().toISOString(), detail: result.detail }); } catch (error) { const safe = toAppError(error); this.repo.setProfileTest(id, { ok: false, at: new Date().toISOString(), detail: safe.message }); throw safe; } }
-  async refreshModels(profileId: string) { const profile = this.repo.getProfile(profileId); const discover = pluginFor(profile.pluginId).discoverModels; if (!discover) throw new AppError("MODEL_DISCOVERY_UNAVAILABLE", "This provider does not offer model discovery", 400); const discovered = await discover(this.providerProfile(profileId)); this.repo.replaceDiscoveredModels(profileId, discovered); return this.listModels(profileId); }
-  addModel(input: { profileId: string; providerModelId: string; label?: string; capabilities: Capability[] }) { return this.configured(this.repo.upsertModel({ ...input, providerModelId: input.providerModelId.trim(), label: input.label?.trim() || input.providerModelId.trim(), manual: true })); }
-  upload(bytes: Buffer, mimeType: string) { return this.assets.save(bytes, mimeType); }
-  async createImageRun(input: { profileId: string; modelId: string; prompt: string; size?: string; assetIds?: string[]; parameters?: Record<string, unknown> }) { const model = this.assertModel(input.profileId, input.modelId, "imageGenerate"); const config = this.operationConfig(input.profileId, model, "imageGenerate"); const assetCount = input.assetIds?.length ?? 0; if (assetCount && !config?.dto.attachments) throw new AppError("OPERATION_ATTACHMENT_MISMATCH", "This model does not support reference images", 400); const parameters = this.parameters(input.profileId, model, "imageGenerate", input.parameters); const attachments = this.validatedAttachments(input.assetIds, config?.dto.attachments); const storedInput = { ...input, parameters }; const run = this.repo.createRun({ profileId: input.profileId, modelId: input.modelId, operation: "imageGenerate", status: "running", input: storedInput }); try { const plugin = pluginFor(this.repo.getProfile(input.profileId).pluginId); const providerOperation = plugin.operations.imageGenerate; if (!providerOperation) throw new AppError("OPERATION_UNAVAILABLE", "This provider does not implement image generation", 400); const result = await providerOperation(this.providerProfile(input.profileId), { model: model.providerModelId, prompt: input.prompt, size: input.size, attachments, parameters }); const assets = result.assets.map((asset) => this.assets.save(asset.bytes, asset.mimeType)); this.repo.linkAssets(run.id, assets); return this.repo.finishRun(run.id, "success", { assetCount: assets.length }, redact(result.inspector) as Record<string, unknown>); } catch (error) { const safe = toAppError(error); return this.repo.finishRun(run.id, "error", null, null, { code: safe.code, message: safe.message }); } }
-  createVideoRun(input: { profileId: string; modelId: string; prompt: string; durationSeconds?: number; size?: string }) { this.assertModel(input.profileId, input.modelId, "videoGenerate"); const plugin = pluginFor(this.repo.getProfile(input.profileId).pluginId); if (!plugin.operations.videoGenerate) throw new AppError("OPERATION_UNAVAILABLE", "This provider does not implement video generation", 400); const run = this.repo.createRun({ profileId: input.profileId, modelId: input.modelId, operation: "videoGenerate", status: "queued", input }); this.repo.createJob(run.id); return run; }
-  async cancelRun(id: string) { const run = this.repo.getRun(id); if (run.operation !== "videoGenerate") return this.repo.finishRun(id, "cancelled", null, run.inspector); const job = this.repo.getJobRawForRun(id); this.repo.cancelJob(id); const plugin = pluginFor(this.repo.getProfile(run.profileId).pluginId); if (job.remote_id && plugin.operations.videoGenerate?.cancel) { try { await plugin.operations.videoGenerate.cancel(this.providerProfile(run.profileId), job.remote_id); } catch { /* local cancellation remains authoritative */ } } return this.repo.finishRun(id, "cancelled", null, run.inspector); }
+  /** Run ids currently inside an upstream call; never reaped while in flight. */
+  private readonly active = new Set<string>();
 
-  private assertAdaptedModel(profileId: string, modelId: string, operation: Capability): ModelDto {
-    return this.assertModel(profileId, modelId, operation);
+  constructor(
+    private readonly repo: Repository,
+    private readonly credentials: CredentialSource,
+    private readonly vault: CredentialVault,
+    private readonly cache: ResultCache,
+    private readonly config: ServiceConfig,
+  ) {}
+
+  // -- catalog -------------------------------------------------------------
+
+  listAdapters(): AdapterDto[] {
+    return adapterDtos();
   }
-  createBatchJob(input: { profileId: string; modelId: string; displayName?: string }) {
-    const profile = this.repo.getProfile(input.profileId);
-    if (!profile.enabled) throw new AppError("PROFILE_DISABLED", "Connection is disabled", 409);
-    const model = this.assertAdaptedModel(input.profileId, input.modelId, "imageGenerate");
-    const displayName = input.displayName?.trim() || `batch-${Date.now()}`;
-    return this.repo.createBatchJob({ id: randomUUID(), profileId: input.profileId, modelId: input.modelId, providerModelId: model.providerModelId, displayName });
+
+  private connectionDto(row: ConnectionRow): ConnectionDto {
+    return {
+      id: row.id, name: row.name, adapterId: row.adapterId, baseUrl: row.baseUrl, config: row.config,
+      enabled: row.enabled, hasKey: Boolean(row.keyEncrypted), lastTest: row.lastTest,
+      createdAt: row.createdAt, updatedAt: row.updatedAt,
+    };
   }
-  addBatchEntry(input: { batchJobId: string; prompt: string; parameters?: Record<string, unknown>; assetIds?: string[] }) {
-    const job = this.repo.getBatchJob(input.batchJobId);
-    if (job.status !== "draft") throw new AppError("BATCH_LOCKED", "Batch entries can only be added while the job is in draft", 409);
-    const model = this.assertAdaptedModel(job.profileId, job.modelId, "imageGenerate");
-    const config = this.operationConfig(job.profileId, model, "imageGenerate");
-    if ((input.assetIds?.length ?? 0) && !config?.dto.attachments) throw new AppError("OPERATION_ATTACHMENT_MISMATCH", "This model does not support reference images", 400);
-    const parameters = this.parameters(job.profileId, model, "imageGenerate", input.parameters);
-    this.validatedAttachments(input.assetIds, config?.dto.attachments);
-    return this.repo.addBatchEntry({ id: randomUUID(), batchJobId: input.batchJobId, prompt: input.prompt, parameters: parameters as unknown as Record<string, unknown>, assetIds: input.assetIds ?? [], modelId: job.modelId });
+
+  /** Read-time derived fields; `operationConfigs` and `adapted` are never persisted. */
+  private configured(row: ModelRow, adapterId: AdapterId): ModelDto {
+    return configuredModel({
+      id: row.id, connectionId: row.connectionId, providerModelId: row.providerModelId, label: row.label,
+      capabilities: row.capabilities, operationConfigs: {}, adapted: true, manual: row.manual,
+      enabled: row.enabled, createdAt: row.createdAt,
+    }, adapterId);
   }
-  private buildBatchInlineRequests(job: BatchJobDto): { requests: BatchInlineRequest[]; bytesEstimate: number } {
-    const model = this.repo.getModel(job.modelId);
-    const config = this.operationConfig(job.profileId, model, "imageGenerate");
-    const attachmentsPolicy = config?.dto.attachments;
-    const requests: BatchInlineRequest[] = [];
-    let bytesEstimate = 0;
-    for (const entry of job.entries) {
-      const attachments = attachmentsPolicy ? this.validatedAttachments(entry.assetIds, attachmentsPolicy) : [];
-      const params = config?.parseParameters(entry.parameters ?? {}) as unknown as OperationParameters;
-      const inlineRequest = geminiBatchRequest(model.providerModelId, entry.prompt, attachments, params);
-      requests.push({ key: String(entry.index), request: inlineRequest });
-      bytesEstimate += JSON.stringify(inlineRequest).length;
-    }
-    return { requests, bytesEstimate };
+
+  private modelDto(row: ModelRow): ModelDto {
+    return this.configured(row, this.repo.getConnection(row.userId, row.connectionId).adapterId);
   }
-  estimateBatchJsonlBytes(job: BatchJobDto): { bytes: number; entries: number; exceeds: boolean } {
-    const model = this.repo.getModel(job.modelId);
-    const policy = this.operationConfig(job.profileId, model, "imageGenerate")?.dto.attachments;
-    const perEntry = Buffer.byteLength(job.entries[0]?.prompt ?? "", "utf8") + 512;
-    let totalBytes = 0;
-    for (const entry of job.entries) {
-      const refs = policy ? this.attachments(entry.assetIds) : [];
-      totalBytes += perEntry + refs.reduce((sum, ref) => sum + Math.ceil(ref.byteSize * 4 / 3), 0);
-    }
-    return { bytes: totalBytes, entries: job.entries.length, exceeds: totalBytes > 20 * 1024 * 1024 };
+
+  listConnections(userId: string): ConnectionDto[] {
+    return this.repo.listConnections(userId).map((row) => this.connectionDto(row));
   }
-  previewBatchJsonl(jobId: string): string {
-    const job = this.repo.getBatchJob(jobId);
-    if (job.status !== "draft") throw new AppError("BATCH_LOCKED", "JSONL preview is only available while the job is in draft", 409);
-    const model = this.repo.getModel(job.modelId);
-    const config = this.operationConfig(job.profileId, model, "imageGenerate");
-    const attachmentsPolicy = config?.dto.attachments;
-    const lines: string[] = [];
-    for (const entry of job.entries) {
-      const attachments = attachmentsPolicy ? this.attachments(entry.assetIds) : [];
-      const params = config?.parseParameters(entry.parameters ?? {}) as unknown as OperationParameters;
-      const inlineRequest = geminiBatchRequest(model.providerModelId, entry.prompt, attachments, params);
-      lines.push(JSON.stringify({ key: String(entry.index), request: inlineRequest }));
-    }
-    return lines.join("\n");
+
+  createConnection(userId: string, input: { name: string; adapterId: ConnectionDto["adapterId"]; baseUrl: string; config?: Record<string, unknown>; apiKey: string }): ConnectionDto {
+    const plugin = pluginFor(input.adapterId);
+    const parsed = plugin.connectionSchema.parse({ baseUrl: input.baseUrl, config: input.config ?? {} });
+    const id = randomUUID();
+    const row = this.repo.createConnection({
+      userId, id, name: input.name, adapterId: input.adapterId, baseUrl: parsed.baseUrl,
+      config: parsed.config ?? {}, keyEncrypted: this.vault.encrypt(input.apiKey, userId, id),
+    });
+    return this.connectionDto(row);
   }
-  async submitBatchJob(id: string) {
-    const job = this.repo.getBatchJob(id);
-    if (job.status !== "draft") throw new AppError("BATCH_LOCKED", "Batch job is no longer in draft", 409);
-    if (!job.entries.length) throw new AppError("BATCH_EMPTY", "Add at least one entry before submitting", 400);
-    const estimate = this.estimateBatchJsonlBytes(job);
-    if (estimate.exceeds) throw new AppError("BATCH_TOO_LARGE", `Batch payload exceeds Gemini's 20MB inline limit (estimated ${Math.ceil(estimate.bytes / 1024)} KB)`, 413);
-    const plugin = pluginFor(this.repo.getProfile(job.profileId).pluginId);
-    const batch = plugin.operations.batchGenerate;
-    if (!batch) throw new AppError("OPERATION_UNAVAILABLE", "This provider does not implement batch generation", 400);
-    const built = this.buildBatchInlineRequests(job);
-    this.repo.setBatchJobStatus(job.id, "submitting", { inspector: { requestsPreview: built.requests.map((req) => ({ key: req.key, request: "<omitted>" })) } });
+
+  updateConnection(userId: string, connectionId: string, input: { name: string; baseUrl: string; config?: Record<string, unknown>; enabled: boolean; apiKey?: string }): ConnectionDto {
+    const current = this.repo.getConnection(userId, connectionId);
+    const parsed = pluginFor(current.adapterId).connectionSchema.parse({ baseUrl: input.baseUrl, config: input.config ?? {} });
+    const row = this.repo.updateConnection(userId, connectionId, {
+      name: input.name, baseUrl: parsed.baseUrl, config: parsed.config ?? {}, enabled: input.enabled,
+      keyEncrypted: input.apiKey ? this.vault.encrypt(input.apiKey, userId, connectionId) : undefined,
+    });
+    return this.connectionDto(row);
+  }
+
+  deleteConnection(userId: string, connectionId: string): void {
+    this.repo.deleteConnection(userId, connectionId);
+  }
+
+  async testConnection(userId: string, connectionId: string): Promise<ConnectionTestDto> {
+    const connection = this.repo.getConnection(userId, connectionId);
+    const at = new Date().toISOString();
     try {
-      const result = await batch.submit(this.providerProfile(job.profileId), { model: this.repo.getModel(job.modelId).providerModelId, requests: built.requests, displayName: job.displayName });
-      this.repo.setBatchJobStatus(job.id, "running", { remoteId: result.remoteId, inspector: redact(result.inspector) as Record<string, unknown>, submittedCount: job.entries.length });
-      return this.repo.getBatchJob(job.id);
+      const result = await pluginFor(connection.adapterId).testConnection(await this.providerConnection(connection));
+      const test: ConnectionTestDto = { ok: true, at, detail: result.detail };
+      this.repo.recordConnectionTest(userId, connectionId, test);
+      return test;
     } catch (error) {
-      const safe = toAppError(error);
-      this.repo.setBatchJobStatus(job.id, "failed", { error: { code: safe.code, message: safe.message } });
-      throw safe;
+      const message = error instanceof Error ? error.message : "Connection test failed";
+      this.repo.recordConnectionTest(userId, connectionId, { ok: false, at, detail: message });
+      throw error;
     }
   }
-  async cancelBatchJob(id: string) {
-    const job = this.repo.getBatchJob(id);
-    if (!["draft", "submitting", "running"].includes(job.status)) throw new AppError("BATCH_LOCKED", "This batch can no longer be cancelled", 409);
-    if (job.remoteId) {
-      const plugin = pluginFor(this.repo.getProfile(job.profileId).pluginId);
-      try { await plugin.operations.batchGenerate?.cancel?.(this.providerProfile(job.profileId), job.remoteId); } catch { /* local cancellation remains authoritative */ }
-    }
-    this.repo.setBatchJobStatus(job.id, "cancelled");
-    for (const entry of job.entries) this.repo.setBatchEntryStatus(entry.id, entry.runId ? "success" : "pending");
-    return this.repo.getBatchJob(id);
+
+  async listModels(userId: string, connectionId: string): Promise<ModelDto[]> {
+    return this.repo.listModels(userId, connectionId).map((row) => this.modelDto(row));
   }
-  deleteBatchJob(id: string) { this.repo.deleteBatchJob(id); }
-  deleteBatchEntry(entryId: string) { this.repo.deleteBatchEntry(entryId); }
-  listBatchJobs() { return this.repo.listBatchJobs(); }
-  getBatchJob(id: string) { return this.repo.getBatchJob(id); }
-  async processBatchJob(job: BatchJobDto): Promise<BatchJobDto> {
-    const plugin = pluginFor(this.repo.getProfile(job.profileId).pluginId);
-    const batch = plugin.operations.batchGenerate;
-    if (!batch) throw new AppError("OPERATION_UNAVAILABLE", "This provider does not implement batch generation", 400);
-    const current = this.repo.getBatchJob(job.id);
-    if (!current.remoteId) throw new AppError("BATCH_NOT_SUBMITTED", "Batch job has not been submitted", 409);
-    if (current.status !== "running" && current.status !== "submitting") return current;
-    const poll = await batch.poll(this.providerProfile(current.profileId), current.remoteId);
-    this.repo.setBatchJobStatus(current.id, poll.state as BatchJobStatus, { inspector: redact(poll.inspector) as Record<string, unknown> });
-    if (poll.state === "failed" || poll.state === "cancelled" || poll.state === "expired") {
-      this.repo.setBatchJobStatus(current.id, poll.state, { error: poll.error ? { code: "BATCH_FAILED", message: poll.error } : null });
-      return this.repo.getBatchJob(current.id);
-    }
-    if (poll.state !== "succeeded" || !poll.responseFile) return this.repo.getBatchJob(current.id);
-    const results = await batch.download(this.providerProfile(current.profileId), poll.responseFile);
-    return this.materializeBatchResults(current.id, results);
+
+  async refreshModels(userId: string, connectionId: string): Promise<ModelDto[]> {
+    const connection = this.repo.getConnection(userId, connectionId);
+    const plugin = pluginFor(connection.adapterId);
+    if (!plugin.discoverModels) throw new AppError("OPERATION_UNAVAILABLE", "This adapter does not offer model discovery", 400);
+    const discovered = await plugin.discoverModels(await this.providerConnection(connection));
+    this.repo.replaceDiscoveredModels(userId, connectionId, discovered);
+    return this.listModels(userId, connectionId);
   }
-  private materializeBatchResults(batchJobId: string, results: Awaited<ReturnType<NonNullable<NonNullable<ProviderPlugin["operations"]["batchGenerate"]>["download"]>>>): BatchJobDto {
-    const job = this.repo.getBatchJob(batchJobId);
-    const model = this.repo.getModel(job.modelId);
-    const byIndex = new Map<string, BatchEntryDto>(job.entries.map((entry) => [String(entry.index), entry]));
-    let succeeded = 0;
-    let failed = 0;
-    for (const result of results) {
-      const key = result.key ?? "";
-      const entry = byIndex.get(key);
-      if (!entry) continue;
-      if (result.error) {
-        failed += 1;
-        this.repo.setBatchEntryStatus(entry.id, "error", { error: { code: "BATCH_ENTRY_FAILED", message: result.error.message ?? "Provider returned an error for this request" } });
-        this.repo.createRun({ profileId: job.profileId, modelId: job.modelId, operation: "imageGenerate", status: "error", input: { batchJobId: job.id, batchEntryId: entry.id, prompt: entry.prompt, parameters: entry.parameters, assetIds: entry.assetIds } });
-        continue;
+
+  async addModel(userId: string, connectionId: string, input: { providerModelId: string; label?: string; capabilities: Operation[] }): Promise<ModelDto> {
+    const row = this.repo.upsertModel({
+      userId, connectionId, providerModelId: input.providerModelId, label: input.label,
+      capabilities: input.capabilities, manual: true,
+    });
+    return this.modelDto(row);
+  }
+
+  deleteModel(userId: string, connectionId: string, modelId: string): void {
+    this.repo.deleteModel(userId, connectionId, modelId);
+  }
+
+  // -- history -------------------------------------------------------------
+
+  getRun(userId: string, runId: string): RunDto {
+    return toRunDto(this.repo.getRun(userId, runId));
+  }
+
+  listRuns(userId: string, page: { limit: number; cursor?: string }): RunPageDto {
+    const result = this.repo.listRuns(userId, page);
+    return { items: result.items.map(toRunDto), nextCursor: result.nextCursor };
+  }
+
+  deleteRun(userId: string, runId: string): void {
+    const { submissionId } = this.repo.deleteRun(userId, runId);
+    // History is gone, so the delivery cache must not keep serving it.
+    this.cache.clear(userId, submissionId);
+  }
+
+  // -- lifecycle -----------------------------------------------------------
+
+  /** Startup: a single process owns the data directory, so nothing is in flight. */
+  recoverAbandonedRuns(): string[] {
+    return this.repo.recoverAbandonedRuns();
+  }
+
+  /** Periodic sweep. Active calls are excluded so a slow call is never reaped. */
+  reapStaleRuns(before: string): string[] {
+    return this.repo.reapStaleRuns({ before, excludeRunIds: [...this.active] });
+  }
+
+  // -- generation ----------------------------------------------------------
+
+  async generate(userId: string, input: GenerateInput): Promise<GenerationResponseDto> {
+    // A replay is answered from the receipt before any current resource is
+    // consulted (CONTRACTS §6.1): a connection that has since been deleted or
+    // disabled must not turn a replay into a new upstream call. The digest is
+    // recomputed from the bytes actually received and never taken from the
+    // client's claim, so reusing a submission id for different content is still
+    // the conflict §6.3 requires — the client that reuses an id is exactly the
+    // one whose declared digest may be stale.
+    const existing = this.repo.getReceipt(userId, input.submissionId);
+    if (existing) return this.replay(userId, existing, await this.digestOf(input));
+
+    const { connection, model, parameters } = this.validate(userId, input);
+    const digest = await this.digestOf(input);
+    if (digest !== input.contentDigest) {
+      throw new AppError("DIGEST_MISMATCH", "The submitted content digest does not match the request", 400);
+    }
+    // Resolved before the run is claimed: an operation the adapter does not
+    // implement is a pre-execution failure, and must not leave a `running` row
+    // behind for a call that was never made.
+    const operation = pluginFor(connection.adapterId).operations.imageGenerate;
+    if (!operation) throw new AppError("OPERATION_UNAVAILABLE", "This adapter does not implement image generation", 400);
+    const resolved = await this.credentials.resolve({ userId, connectionId: input.connectionId });
+
+    const runId = randomUUID();
+    const claim = this.repo.claimRun({
+      userId, id: runId, submissionId: input.submissionId, contentDigest: digest,
+      connectionId: connection.id, connectionName: connection.name, modelId: model.id,
+      providerModelId: model.providerModelId, prompt: input.prompt,
+      parameters, referenceCount: input.references.length,
+    });
+    // Lost the race: another request owns this submission, and this one must not
+    // reach upstream.
+    if (!claim.claimed) return this.replay(userId, claim.receipt, digest);
+
+    this.active.add(runId);
+    try {
+      const result = await operation(
+        { id: connection.id, adapterId: connection.adapterId, baseUrl: connection.baseUrl, config: connection.config, credential: resolved },
+        { model: model.providerModelId, prompt: input.prompt, attachments: input.references.map((r) => ({ mimeType: r.mimeType, base64: r.bytes.toString("base64"), byteSize: r.bytes.byteLength })), parameters },
+      );
+      return this.deliver(userId, input.submissionId, runId, result.images, result.returnedImageCount);
+    } catch (error) {
+      return this.recordFailure(userId, input.submissionId, runId, error);
+    } finally {
+      this.active.delete(runId);
+    }
+  }
+
+  /** Canonical digest of the raw input as received (CONTRACTS §6.1). */
+  private async digestOf(input: GenerateInput): Promise<string> {
+    const references: DigestReference[] = [];
+    for (const reference of input.references) {
+      references.push({ mimeType: reference.mimeType.toLowerCase(), sha256: await sha256Hex(reference.bytes) });
+    }
+    return contentDigest({
+      connectionId: input.connectionId, modelId: input.modelId, prompt: input.prompt,
+      parameters: input.parameters ?? null, references,
+    });
+  }
+
+  /**
+   * Everything a run needs from the current resources. Parameters are defaulted
+   * here — after the digest, which is computed from the raw input — and the
+   * defaulted values are what the run snapshots.
+   */
+  private validate(userId: string, input: GenerateInput): { connection: ConnectionRow; model: ModelRow; parameters: ParameterValues } {
+    const connection = this.repo.getConnection(userId, input.connectionId);
+    if (!connection.enabled) throw new AppError("CONNECTION_DISABLED", "This connection is disabled", 409);
+    const plugin = pluginFor(connection.adapterId);
+    const model = this.repo.getModelForConnection(userId, input.connectionId, input.modelId);
+    const configured = this.configured(model, connection.adapterId);
+    if (!configured.adapted) throw new AppError("MODEL_NOT_ADAPTED", configured.availabilityMessage ?? "This model is not adapted for Solaris", 400);
+    if (!configured.enabled || !configured.capabilities.includes("imageGenerate")) {
+      throw new AppError("OPERATION_UNAVAILABLE", "This model is not enabled for image generation", 400);
+    }
+
+    const config = plugin.modelOperationConfig?.(model.providerModelId, "imageGenerate");
+    if (!config && input.parameters && Object.keys(input.parameters).length) {
+      throw new AppError("PARAMETERS_UNAVAILABLE", "This model does not expose configurable parameters", 400);
+    }
+    const parameters = config ? config.parseParameters(input.parameters ?? {}) : {};
+    this.validateReferences(input.references, config?.dto.attachments);
+    return { connection, model, parameters };
+  }
+
+  private validateReferences(references: ReferenceInput[], policy?: { accept: string[]; maxCount: number; maxFileBytes: number; maxTotalBytes: number }) {
+    if (references.length === 0) return;
+    if (!policy) throw new AppError("REFERENCE_COUNT", "This model does not support reference images", 400);
+    if (references.length > policy.maxCount) throw new AppError("REFERENCE_COUNT", `This model accepts at most ${policy.maxCount} reference images`, 400);
+    const invalid = references.find((reference) => !policy.accept.includes(reference.mimeType.toLowerCase()));
+    if (invalid) throw new AppError("REFERENCE_TYPE", `Reference images must be ${policy.accept.map((type) => type.replace("image/", "").toUpperCase()).join(", ")}`, 415);
+    const oversized = references.find((reference) => reference.bytes.byteLength > policy.maxFileBytes);
+    if (oversized) throw new AppError("REFERENCE_SIZE", `Each reference image must be ${Math.floor(policy.maxFileBytes / 1024 / 1024)} MB or smaller`, 413);
+    const total = references.reduce((sum, reference) => sum + reference.bytes.byteLength, 0);
+    if (total > policy.maxTotalBytes) throw new AppError("REFERENCE_TOTAL_SIZE", `Reference images must total ${Math.floor(policy.maxTotalBytes / 1024 / 1024)} MB or less`, 413);
+  }
+
+  private deliver(userId: string, submissionId: string, runId: string, images: { bytes: Buffer; mimeType: string }[], returnedImageCount: number): GenerationResponseDto {
+    const refs: RunImageRefDto[] = images.map((image) => ({ mimeType: image.mimeType, byteSize: image.bytes.byteLength }));
+    const total = refs.reduce((sum, image) => sum + image.byteSize, 0);
+
+    // Generated successfully but too large to hand back: the generation stands,
+    // the delivery does not. Downgrading it to `error` would claim the model
+    // produced nothing.
+    if (total > this.config.imageResultMaxBytes) {
+      const run = this.repo.finishRun(userId, runId, {
+        status: "success", images: refs, returnedImageCount, retainedImageCount: images.length,
+      });
+      return this.response(submissionId, run, { kind: "unavailable", reason: "result-too-large" });
+    }
+
+    const delivered: GeneratedImageDto[] = images.map((image) => ({ mimeType: image.mimeType, byteSize: image.bytes.byteLength, dataBase64: image.bytes.toString("base64") }));
+    // Published before the run is marked success, so a replay in this process
+    // can never observe `success` with the bytes not yet available.
+    this.cache.publish(userId, submissionId, delivered);
+    const run = this.repo.finishRun(userId, runId, {
+      status: "success", images: refs, returnedImageCount, retainedImageCount: images.length,
+    });
+    return this.response(submissionId, run, { kind: "delivered", images: delivered });
+  }
+
+  private recordFailure(userId: string, submissionId: string, runId: string, error: unknown): GenerationResponseDto {
+    if (!(error instanceof ProviderCallError)) throw error;
+    // `unknown` means the request may have been accepted: terminal, never retried.
+    const status: Extract<RunStatus, "error" | "uncertain"> = error.outcome === "unknown" ? "uncertain" : "error";
+    const reason: Extract<GenerationResultDto, { kind: "unavailable" }>["reason"] =
+      error.outcome === "unknown" ? (error.errorCode === "RESULT_TOO_LARGE" ? "result-too-large" : "submission-unknown") : "not-generated";
+    const run = this.repo.finishRun(userId, runId, {
+      status, images: [], returnedImageCount: null, retainedImageCount: null,
+      error: { code: error.errorCode, message: error.message },
+    });
+    return this.response(submissionId, run, { kind: "unavailable", reason });
+  }
+
+  private response(submissionId: string, row: RunRow, result: GenerationResultDto): GenerationResponseDto {
+    return { submissionId, status: row.status, run: toRunDto(row), result };
+  }
+
+  /**
+   * CONTRACTS §6.2. `digest` is the digest recomputed from the received bytes,
+   * never the client's declared one, so a reused submission id carrying
+   * different content is a conflict here too.
+   */
+  private replay(userId: string, receipt: ReceiptRow, digest: string): GenerationResponseDto {
+    if (receipt.contentDigest !== digest) {
+      throw new AppError("SUBMISSION_CONFLICT", "This submission id was already used with different content", 409);
+    }
+    if (receipt.historyDeleted) {
+      return { submissionId: receipt.submissionId, status: receipt.status, run: null, result: { kind: "unavailable", reason: "history-deleted" } };
+    }
+    const run = this.repo.getRun(userId, receipt.runId);
+    const dto = toRunDto(run);
+    switch (receipt.status) {
+      case "running":
+        return { submissionId: receipt.submissionId, status: "running", run: dto, result: { kind: "pending" } };
+      case "success": {
+        const images = this.cache.get(userId, receipt.submissionId);
+        return { submissionId: receipt.submissionId, status: "success", run: dto, result: images ? { kind: "delivered", images } : { kind: "unavailable", reason: "cache-miss" } };
       }
-      const adapted = adaptGeminiOutput(result.response as Parameters<typeof adaptGeminiOutput>[0]);
-      const params = this.parameters(job.profileId, model, "imageGenerate", entry.parameters);
-      const configuredCount = (params as Record<string, unknown>).outputCount;
-      const outputCount = typeof configuredCount === "number" ? configuredCount : 1;
-      const assets = adapted.assets.slice(0, outputCount);
-      if (!assets.length) {
-        failed += 1;
-        this.repo.setBatchEntryStatus(entry.id, "error", { error: { code: "NO_INLINE_IMAGE", message: "Provider returned no inline image data" } });
-        this.repo.createRun({ profileId: job.profileId, modelId: job.modelId, operation: "imageGenerate", status: "error", input: { batchJobId: job.id, batchEntryId: entry.id, prompt: entry.prompt, parameters: entry.parameters, assetIds: entry.assetIds } });
-        continue;
-      }
-      const run = this.repo.createRun({ profileId: job.profileId, modelId: job.modelId, operation: "imageGenerate", status: "success", input: { batchJobId: job.id, batchEntryId: entry.id, prompt: entry.prompt, parameters: entry.parameters, assetIds: entry.assetIds } });
-      const saved = assets.map((asset) => this.assets.save(asset.bytes, asset.mimeType));
-      this.repo.linkAssets(run.id, saved);
-      this.repo.finishRun(run.id, "success", { assetCount: saved.length }, { batch: { key, responsePreview: "<inline image omitted>" } });
-      this.repo.setBatchEntryStatus(entry.id, "success", { runId: run.id });
-      succeeded += 1;
+      case "error":
+        return { submissionId: receipt.submissionId, status: "error", run: dto, result: { kind: "unavailable", reason: "not-generated" } };
+      case "uncertain":
+        return { submissionId: receipt.submissionId, status: "uncertain", run: dto, result: { kind: "unavailable", reason: "submission-unknown" } };
     }
-    this.repo.setBatchJobStatus(batchJobId, "succeeded", { succeededCount: succeeded, failedCount: failed });
-    return this.repo.getBatchJob(batchJobId);
+  }
+
+  // -- credential plumbing -------------------------------------------------
+
+  private async providerConnection(connection: ConnectionRow): Promise<ProviderConnection> {
+    return {
+      id: connection.id, adapterId: connection.adapterId, baseUrl: connection.baseUrl, config: connection.config,
+      credential: await this.credentials.resolve({ userId: connection.userId, connectionId: connection.id }),
+    };
   }
 }

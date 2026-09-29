@@ -1,205 +1,425 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import type { AssetDto, AttachmentPolicyDto, BatchJobDto, Capability, ModelDto, ModelOperationConfigDto, OperationParameterDto, ProfileDto, RunDto } from "../shared/contracts";
-import { addBatchEntry, api, ApiClientError, cancelBatch, createBatch, deleteBatch, deleteBatchEntry, getBatch, listBatches, listModels, listProfiles, listRuns, previewBatchJsonl, submitBatch, upload } from "./api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { SessionDto } from "../shared/contracts.js";
+import { SolarisApi } from "./api.js";
+import { useConnectionCatalog } from "./catalog.js";
+import { Connections } from "./Connections.js";
+import { ServicesContext, type Services } from "./context.js";
+import { describeError, isAuthRequired } from "./display.js";
+import { History } from "./History.js";
+import { ServerAddress } from "./ServerAddress.js";
+import { createSessionProvider, type AppDependencies } from "./session.js";
+import { Workspace } from "./Workspace.js";
 
-type Plugin = { id: ProfileDto["pluginId"]; label: string; fields: { name: string; label: string; type: string; placeholder?: string }[]; operations: string[] };
-type Page = "playground" | "connections" | "batches" | "history" | "settings";
-const operationLabels: Record<string, string> = { imageGenerate: "Generate image", videoGenerate: "Generate video" };
-function modelCapabilityLabels(capabilities: Capability[]) {
-  const labels: string[] = [];
-  if (capabilities.includes("imageGenerate")) labels.push("Generate image");
-  if (capabilities.includes("videoGenerate")) labels.push("Generate video");
-  return labels;
-}
+type Page = "workspace" | "connections" | "history";
+
 const navigation: { id: Page; label: string; index: string }[] = [
-  { id: "playground", label: "Workspace", index: "01" },
+  { id: "workspace", label: "Workspace", index: "01" },
   { id: "connections", label: "Connections", index: "02" },
-  { id: "batches", label: "Batch calls", index: "03" },
-  { id: "history", label: "Run archive", index: "04" },
-  { id: "settings", label: "Settings", index: "05" },
+  { id: "history", label: "Run history", index: "03" },
 ];
-function message(error: unknown) { return error instanceof ApiClientError ? error.message : error instanceof Error ? error.message : "Unexpected error"; }
-function firstUsableModel(models: ModelDto[]) { return models.find((model) => model.enabled && model.adapted)?.id ?? ""; }
-const batchStatusLabels: Record<BatchJobDto["status"], string> = {
-  draft: "Draft", submitting: "Submitting…", running: "Running…",
-  succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", expired: "Expired",
-};
 
-export function App() {
-  const [page, setPage] = useState<Page>("playground"); const [profiles, setProfiles] = useState<ProfileDto[]>([]); const [models, setModels] = useState<ModelDto[]>([]); const [runs, setRuns] = useState<RunDto[]>([]); const [plugins, setPlugins] = useState<Plugin[]>([]); const [batches, setBatches] = useState<BatchJobDto[]>([]); const [selectedProfileId, setSelectedProfileId] = useState<string>(""); const [selectedModelId, setSelectedModelId] = useState<string>(""); const [notice, setNotice] = useState<string>("");
-  const refresh = useCallback(async () => { try { const [nextProfiles, nextRuns, nextPlugins, nextBatches] = await Promise.all([listProfiles(), listRuns(), api<Plugin[]>("/api/plugins"), listBatches()]); setProfiles(nextProfiles); setRuns(nextRuns); setPlugins(nextPlugins); setBatches(nextBatches); const profileId = selectedProfileId && nextProfiles.some((x) => x.id === selectedProfileId) ? selectedProfileId : nextProfiles[0]?.id ?? ""; setSelectedProfileId(profileId); if (profileId) { const nextModels = await listModels(profileId); setModels(nextModels); const modelId = selectedModelId && nextModels.some((x) => x.id === selectedModelId && x.enabled && x.adapted) ? selectedModelId : firstUsableModel(nextModels); setSelectedModelId(modelId); } else { setModels([]); setSelectedModelId(""); } } catch (error) { setNotice(message(error)); } }, [selectedModelId, selectedProfileId]);
-  useEffect(() => { void refresh(); }, []);
-  const selectProfile = async (id: string) => { setSelectedProfileId(id); setSelectedModelId(""); try { const next = await listModels(id); setModels(next); setSelectedModelId(firstUsableModel(next)); } catch (error) { setNotice(message(error)); } };
-  const selectedProfile = profiles.find((item) => item.id === selectedProfileId); const selectedModel = models.find((item) => item.id === selectedModelId);
-  return <main className="shell">
-    <aside className="sidebar">
-      <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><div><h1>Solaris</h1><p>Local provider playground</p></div></div>
-      <nav aria-label="Primary navigation">{navigation.map((item) => <button className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => setPage(item.id)} key={item.id}><span>{item.index}</span>{item.label}</button>)}</nav>
-      <div className="solar-rail" aria-hidden="true"><span className="solar-orb" /></div>
-      <div className="local-state"><span className="pulse" /><div><b>Local system</b><small>127.0.0.1 · private</small></div></div>
-    </aside>
-    <div className="workspace">
-      <header className="topbar"><div><span className="eyebrow">{navigation.find((item) => item.id === page)?.index} / SOLARIS</span><p>{profiles.length} connection{profiles.length === 1 ? "" : "s"} · {models.filter((model) => model.enabled && model.adapted).length} available model{models.filter((model) => model.enabled && model.adapted).length === 1 ? "" : "s"}</p></div><span className="local"><i />Bound to this machine</span></header>
-      {notice && <div className="notice" role="status"><span>{notice}</span><button aria-label="Dismiss notice" onClick={() => setNotice("")}>×</button></div>}
-      <div className="page-stage">
-        {page === "playground" && <Playground profiles={profiles} models={models} selectedProfile={selectedProfile} selectedModel={selectedModel} selectProfile={selectProfile} selectModel={setSelectedModelId} onRefresh={refresh} onNotice={setNotice} />}
-        {page === "connections" && <Connections profiles={profiles} plugins={plugins} models={models} selectedProfile={selectedProfile} onSelect={selectProfile} onRefresh={refresh} onNotice={setNotice} />}
-        {page === "batches" && <Batches batches={batches} profiles={profiles} models={models} selectedProfileId={selectedProfileId} selectedModelId={selectedModelId} selectProfile={selectProfile} selectModel={setSelectedModelId} onRefresh={refresh} onNotice={setNotice} />}
-        {page === "history" && <History runs={runs} onRefresh={refresh} onNotice={setNotice} />}
-        {page === "settings" && <Settings onRefresh={refresh} onNotice={setNotice} />}
-      </div>
-    </div>
-  </main>;
-}
+/** What this device says about the Server address before anything else runs. */
+type StoredServer = { kind: "configured"; origin: string } | { kind: "unset" } | { kind: "unusable"; message: string };
 
-type ParameterValues = Record<string, string | number | boolean>;
-function defaultsFor(config?: ModelOperationConfigDto): ParameterValues { return Object.fromEntries((config?.parameters ?? []).flatMap((parameter) => parameter.default === undefined ? [] : [[parameter.key, parameter.default]])); }
-function imageConfig(model?: ModelDto) { return model?.operationConfigs?.imageGenerate; }
+/**
+ * Shell. The Server address decides everything below it: one `ServerApp` per
+ * configured origin, so switching Server (or account) starts from that Server's
+ * own stored session and local scope and never renders the previous one's
+ * records.
+ */
+export function App({ deps }: { deps: AppDependencies }) {
+  const [stored, setStored] = useState<StoredServer>(() => readStoredServer(deps));
 
-function Playground({ profiles, models, selectedProfile, selectedModel, selectProfile, selectModel, onRefresh, onNotice }: { profiles: ProfileDto[]; models: ModelDto[]; selectedProfile?: ProfileDto; selectedModel?: ModelDto; selectProfile: (id: string) => Promise<void>; selectModel: (id: string) => void; onRefresh: () => Promise<void>; onNotice: (text: string) => void }) {
-  const [prompt, setPrompt] = useState(""); const [assets, setAssets] = useState<AssetDto[]>([]); const [parameters, setParameters] = useState<ParameterValues>({}); const [run, setRun] = useState<RunDto | null>(null); const [busy, setBusy] = useState(false);
-  const capabilities = selectedModel?.capabilities ?? []; const config = imageConfig(selectedModel); const attachmentPolicy = config?.attachments;
-  useEffect(() => { setPrompt(""); setAssets([]); setRun(null); setParameters(defaultsFor(imageConfig(selectedModel))); }, [selectedModel?.id, selectedProfile?.id]);
-  async function send(event: FormEvent) {
-    event.preventDefault(); if (!selectedProfile || !selectedModel || !prompt.trim()) return; setBusy(true); setRun(null);
-    try {
-      if (!capabilities.includes("imageGenerate")) throw new Error("This model cannot generate images.");
-      const created = await api<RunDto>("/api/runs", { method: "POST", body: JSON.stringify({ profileId: selectedProfile.id, modelId: selectedModel.id, operation: "imageGenerate", prompt, assetIds: assets.map((asset) => asset.id), parameters }) }); setRun(created); if (created.error) onNotice(created.error.message);
-      setPrompt(""); setAssets([]); await onRefresh();
-    } catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+  // An unusable stored address is never papered over with the build's default:
+  // it is shown where it can be corrected.
+  const origin =
+    stored.kind === "configured" ? stored.origin : stored.kind === "unset" ? deps.defaultServerOrigin : null;
+  const problem = stored.kind === "unusable" ? stored.message : null;
+
+  if (origin === null) {
+    return (
+      <main className="signin">
+        <div className="card stack">
+          <Brand />
+          <h3>Which Server?</h3>
+          <p>
+            This build has no Server address yet. Enter the absolute address of the Solaris Server this device should talk
+            to.
+          </p>
+          <ServerAddress
+            settings={deps.settings}
+            current={null}
+            defaultOrigin={deps.defaultServerOrigin}
+            problem={problem}
+            onSaved={(next) => setStored({ kind: "configured", origin: next })}
+            onUseDefault={() => setStored({ kind: "unset" })}
+          />
+        </div>
+      </main>
+    );
   }
-  const submitLabel = "Generate";
-  const atLimit = Boolean(config?.attachments && assets.length >= config.attachments.maxCount);
-  return <section className="playground"><h2>Playground</h2>{!profiles.length ? <Empty title="No connections yet" text="Create a named connection before starting a run." /> : <><div className="selectors"><label>Connection<select value={selectedProfile?.id ?? ""} onChange={(event) => void selectProfile(event.target.value)}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.pluginId}</option>)}</select></label><label>Model<select value={selectedModel?.id ?? ""} onChange={(event) => selectModel(event.target.value)}><option value="" disabled>Select an adapted model</option>{models.filter((model) => model.enabled).map((model) => <option value={model.id} disabled={!model.adapted} key={model.id}>{model.label}{model.adapted ? "" : " — Not adapted"}</option>)}</select></label></div>{selectedModel ? <form className="card creation-card" onSubmit={(event) => void send(event)}>{config?.warning && <div className="model-warning" role="status"><b>Model notice</b><span>{config.warning}</span></div>}<div className="creation-grid"><div className="prompt-panel"><label className="prompt-label" htmlFor="workspace-prompt">{assets.length ? "Edit instruction" : "Prompt"}</label><textarea id="workspace-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={assets.length ? "Describe how to transform these references…" : "Describe the image you want to create…"} rows={8} />{attachmentPolicy ? <AssetPicker assets={assets} contextAssets={[]} policy={attachmentPolicy} onChange={setAssets} onNotice={onNotice} disabled={busy || atLimit} /> : <p className="muted upload-unavailable">This model does not support reference images.</p>}</div><aside className="output-spec"><div className="spec-heading"><span>Output specification</span><small>{config?.parameters.length ? "Model controls" : "Provider defaults"}</small></div><ParameterPanel definitions={config?.parameters ?? []} values={parameters} onChange={(key, value) => setParameters((current) => ({ ...current, [key]: value }))} /></aside></div><div className="creation-actions"><span className="action-context">{assets.length ? `${assets.length} reference${assets.length === 1 ? "" : "s"}` : "Text prompt · new image"}</span><span className="spacer" /><button className="primary" disabled={busy || !prompt.trim()}>{busy ? "Running…" : submitLabel}</button></div></form> : <Empty title="No adapted models" text="Discovered models marked Not adapted cannot be used in Solaris." />}{run && <div className="card result"><RunView run={run} /></div>}</>}</section>;
+
+  return (
+    <ServerApp
+      key={origin}
+      deps={deps}
+      origin={origin}
+      developmentDefault={stored.kind === "unset"}
+      problem={problem}
+      onChangeServer={(next) => setStored({ kind: "configured", origin: next })}
+      onUseDefault={() => setStored({ kind: "unset" })}
+    />
+  );
 }
 
-function ParameterPanel({ definitions, values, onChange }: { definitions: OperationParameterDto[]; values: ParameterValues; onChange: (key: string, value: string | number | boolean) => void }) {
-  if (!definitions.length) return <p className="muted spec-empty">This model does not expose adjustable output parameters.</p>;
-  return <div className="parameter-list">{definitions.map((definition) => <div className={`parameter parameter-${definition.key}`} key={definition.key}><div className="parameter-title"><b>{definition.label}</b>{definition.description && <small>{definition.description}</small>}</div>{definition.type === "enum" && <div className="parameter-options">{definition.options?.map((option) => <button type="button" className={values[definition.key] === option.value ? "active" : ""} aria-pressed={values[definition.key] === option.value} onClick={() => onChange(definition.key, option.value)} key={String(option.value)}><span>{option.label}</span>{option.detail && <small>{option.detail}</small>}</button>)}</div>}{definition.type === "boolean" && <button type="button" className={`toggle ${values[definition.key] ? "active" : ""}`} aria-pressed={Boolean(values[definition.key])} onClick={() => onChange(definition.key, !values[definition.key])}><i />{values[definition.key] ? "On" : "Off"}</button>}{definition.type === "number" && <input type="number" min={definition.min} max={definition.max} step={definition.step} value={typeof values[definition.key] === "number" ? String(values[definition.key]) : ""} onChange={(event) => onChange(definition.key, Number(event.target.value))} />}</div>)}</div>;
-}
-
-function AssetPicker({ assets, contextAssets, policy, onChange, onNotice, disabled }: { assets: AssetDto[]; contextAssets: AssetDto[]; policy: AttachmentPolicyDto; onChange: (assets: AssetDto[]) => void; onNotice: (text: string) => void; disabled: boolean }) {
-  const inputRef = useRef<HTMLInputElement>(null); const [uploading, setUploading] = useState(false); const [dragging, setDragging] = useState(false); const usedCount = contextAssets.length + assets.length; const usedBytes = [...contextAssets, ...assets].reduce((sum, asset) => sum + asset.byteSize, 0); const remaining = Math.max(0, policy.maxCount - usedCount);
-  async function addFiles(fileList: FileList | null) {
-    if (!fileList?.length || disabled || uploading) return; const files = Array.from(fileList); if (files.length > remaining) { onNotice(`You can add ${remaining} more reference image${remaining === 1 ? "" : "s"}.`); return; }
-    const invalid = files.find((file) => !policy.accept.includes(file.type)); if (invalid) { onNotice(`${invalid.name} is not a supported reference format.`); return; }
-    const oversized = files.find((file) => file.size > policy.maxFileBytes); if (oversized) { onNotice(`${oversized.name} exceeds the ${Math.floor(policy.maxFileBytes / 1024 / 1024)} MB per-file limit.`); return; }
-    if (usedBytes + files.reduce((sum, file) => sum + file.size, 0) > policy.maxTotalBytes) { onNotice(`Reference images must total ${Math.floor(policy.maxTotalBytes / 1024 / 1024)} MB or less.`); return; }
-    setUploading(true); try { onChange([...assets, ...await Promise.all(files.map((file) => upload(file)))]); } catch (error) { onNotice(message(error)); } finally { setUploading(false); }
+function readStoredServer(deps: AppDependencies): StoredServer {
+  try {
+    const origin = deps.settings.read();
+    return origin === null ? { kind: "unset" } : { kind: "configured", origin };
+  } catch (error) {
+    return { kind: "unusable", message: describeError(error) };
   }
-  return <div className="asset-picker"><div className="asset-heading"><div><b>{contextAssets.length ? "Add references" : "Reference images"}</b><small>{policy.description ?? "Attach local media for this request."}</small></div><span>{usedCount} / {policy.maxCount}<small>{formatBytes(usedBytes)} / {formatBytes(policy.maxTotalBytes)}</small></span></div>{assets.length > 0 && <div className="asset-grid">{assets.map((asset, index) => <figure key={asset.id}><img src={asset.url} alt={`Reference ${contextAssets.length + index + 1}`} /><figcaption><span>{contextAssets.length + index + 1}</span><button type="button" aria-label={`Remove reference ${index + 1}`} onClick={() => onChange(assets.filter((item) => item.id !== asset.id))}>×</button></figcaption></figure>)}</div>}<button type="button" className={`drop-zone ${dragging ? "dragging" : ""}`} disabled={disabled || uploading || remaining === 0} onClick={() => inputRef.current?.click()} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void addFiles(event.dataTransfer.files); }}><b>{uploading ? "Uploading…" : remaining ? "Drop images or choose files" : "Reference limit reached"}</b><small>{policy.accept.map((type) => (type.split("/")[1] ?? type).toUpperCase()).join(" · ")} · up to {Math.floor(policy.maxFileBytes / 1024 / 1024)} MB each</small></button><input ref={inputRef} className="visually-hidden" type="file" accept={policy.accept.join(",")} multiple={policy.maxCount > 1} onChange={(event) => { void addFiles(event.target.files); event.target.value = ""; }} /></div>;
-}
-function formatBytes(bytes: number) { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(bytes ? 1 : 0)} MB` : `${Math.ceil(bytes / 1024)} KB`; }
-
-function Connections({ profiles, plugins, models, selectedProfile, onSelect, onRefresh, onNotice }: { profiles: ProfileDto[]; plugins: Plugin[]; models: ModelDto[]; selectedProfile?: ProfileDto; onSelect: (id: string) => Promise<void>; onRefresh: () => Promise<void>; onNotice: (text: string) => void }) {
-  const [creating, setCreating] = useState(false); const [editing, setEditing] = useState<ProfileDto | null>(null); const [name, setName] = useState(""); const [pluginId, setPluginId] = useState<ProfileDto["pluginId"]>("gemini"); const [baseUrl, setBaseUrl] = useState("https://generativelanguage.googleapis.com"); const [apiKey, setApiKey] = useState(""); const [enabled, setEnabled] = useState(true); const [modelId, setModelId] = useState(""); const [modelLabel, setModelLabel] = useState(""); const [caps, setCaps] = useState<Capability[]>(["imageGenerate"]); const [busy, setBusy] = useState(false); const [addingModels, setAddingModels] = useState(false); const currentPlugin = plugins.find((plugin) => plugin.id === pluginId);
-  useEffect(() => { const fallback = currentPlugin?.fields.find((field) => field.name === "baseUrl")?.placeholder; if (fallback) setBaseUrl(fallback); }, [pluginId]);
-  function closeForm() { setCreating(false); setEditing(null); setName(""); setApiKey(""); setEnabled(true); }
-  function edit(profile: ProfileDto) { setCreating(true); setEditing(profile); setName(profile.name); setPluginId(profile.pluginId); setBaseUrl(profile.baseUrl); setApiKey(""); setEnabled(profile.enabled); }
-  async function create(event: FormEvent) { event.preventDefault(); setBusy(true); try { const profile = editing ? await api<ProfileDto>(`/api/profiles/${editing.id}`, { method: "PUT", body: JSON.stringify({ name, baseUrl, enabled, ...(apiKey ? { apiKey } : {}) }) }) : await api<ProfileDto>("/api/profiles", { method: "POST", body: JSON.stringify({ name, pluginId, baseUrl, apiKey }) }); closeForm(); await onRefresh(); await onSelect(profile.id); } catch (error) { onNotice(message(error)); } finally { setBusy(false); } }
-  async function test(id: string) { try { await api(`/api/profiles/${id}/test`, { method: "POST" }); await onRefresh(); } catch (error) { onNotice(message(error)); await onRefresh(); } }
-  async function refreshModels(id: string, announce = false) { setAddingModels(true); try { const next = await api<ModelDto[]>(`/api/profiles/${id}/models/refresh`, { method: "POST" }); await onRefresh(); if (announce) { const count = next.filter((model) => !model.manual).length; onNotice(`Automatically added or refreshed ${count} discovered model${count === 1 ? "" : "s"}.`); } } catch (error) { onNotice(message(error)); } finally { setAddingModels(false); } }
-  async function addModel(event: FormEvent) { event.preventDefault(); if (!selectedProfile) return; try { await api(`/api/profiles/${selectedProfile.id}/models`, { method: "POST", body: JSON.stringify({ providerModelId: modelId, label: modelLabel || undefined, capabilities: caps }) }); setModelId(""); setModelLabel(""); await onRefresh(); } catch (error) { onNotice(message(error)); } }
-  function toggleCapability(capability: Capability) { setCaps((current) => current.includes(capability) ? current.filter((item) => item !== capability) : [...current, capability]); }
-  return <section><div className="title-row"><h2>Connections</h2><button className="primary" onClick={() => creating ? closeForm() : setCreating(true)}>{creating ? "Close" : "New connection"}</button></div>{creating && <form className="card stack" onSubmit={(event) => void create(event)}><label>Name<input value={name} onChange={(event) => setName(event.target.value)} required placeholder="Local image provider" /></label><label>Provider<select value={pluginId} disabled={Boolean(editing)} onChange={(event) => setPluginId(event.target.value as ProfileDto["pluginId"])}>{plugins.map((plugin) => <option key={plugin.id} value={plugin.id}>{plugin.label}</option>)}</select></label><label>Base URL<input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /></label><label>API key<input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required={!editing} placeholder={editing ? "Leave blank to keep current key" : undefined} /></label>{editing && <label className="check-line"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />Enabled</label>}<p className="muted">The key is encrypted locally and is never returned to this page.</p><button className="primary" disabled={busy}>{busy ? "Saving…" : editing ? "Save changes" : "Save connection"}</button></form>}<div className="connection-grid">{profiles.map((profile) => <article className={`card connection ${selectedProfile?.id === profile.id ? "selected" : ""}`} key={profile.id} onClick={() => void onSelect(profile.id)}><h3>{profile.name} {!profile.enabled && <small>disabled</small>}</h3><p>{profile.pluginId}</p><p className="muted">{profile.baseUrl}</p><p>{profile.lastTest ? (profile.lastTest.ok ? `✓ ${profile.lastTest.detail}` : `× ${profile.lastTest.detail}`) : "Not tested"}</p><div className="row"><button type="button" onClick={(event) => { event.stopPropagation(); void test(profile.id); }}>Test</button><button type="button" disabled={addingModels} onClick={(event) => { event.stopPropagation(); void refreshModels(profile.id); }}>Refresh models</button><button type="button" onClick={(event) => { event.stopPropagation(); edit(profile); }}>Edit</button><button type="button" onClick={(event) => { event.stopPropagation(); void api(`/api/profiles/${profile.id}`, { method: "DELETE" }).then(onRefresh).catch((error) => onNotice(message(error))); }}>Delete</button></div></article>)}</div>{selectedProfile && <div className="card stack"><div className="title-row"><h3>{selectedProfile.name} models</h3><button type="button" className="primary" disabled={addingModels} onClick={() => void refreshModels(selectedProfile.id, true)}>{addingModels ? "Adding models…" : "Auto add models"}</button></div><ul className="model-list">{models.map((model) => <li className={model.adapted ? "" : "unadapted"} key={model.id}><span><b>{model.label}</b><small>{model.adapted ? `${modelCapabilityLabels(model.capabilities).join(" · ")}${model.manual ? " · manual" : ""}` : model.availabilityMessage}</small></span><span className={`model-status ${model.adapted ? "ready" : ""}`}>{model.adapted ? "Ready" : "Not adapted"}</span><button onClick={() => void api(`/api/models/${model.id}`, { method: "DELETE" }).then(onRefresh).catch((error) => onNotice(message(error)))}>Delete</button></li>)}</ul><form className="inline-form" onSubmit={(event) => void addModel(event)}><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="Provider model ID" required /><input value={modelLabel} onChange={(event) => setModelLabel(event.target.value)} placeholder="Display name (optional)" /><span className="checks">{(["imageGenerate", "videoGenerate"] as const).map((capability) => <label key={capability}><input type="checkbox" checked={caps.includes(capability)} onChange={() => toggleCapability(capability)} />{operationLabels[capability]}</label>)}</span><button>Add manual model</button></form></div>}</section>;
 }
 
-function History({ runs, onRefresh, onNotice }: { runs: RunDto[]; onRefresh: () => Promise<void>; onNotice: (text: string) => void }) {
-  const [curl, setCurl] = useState(""); return <section><h2>History</h2><div className="card"><h3>Runs</h3>{runs.length ? <ul className="run-list">{runs.map((run) => <li key={run.id}><span><b>{operationLabels[run.operation] ?? run.operation}</b> · {run.status}<small>{new Date(run.createdAt).toLocaleString()}</small></span><div><button onClick={() => void api<{ curl: string }>(`/api/runs/${run.id}/curl`).then((result) => setCurl(result.curl)).catch((error) => onNotice(message(error)))}>cURL</button>{run.status === "running" || run.status === "queued" ? <button onClick={() => void api(`/api/runs/${run.id}/cancel`, { method: "POST" }).then(onRefresh).catch((error) => onNotice(message(error)))}>Cancel</button> : null}<button onClick={() => void api(`/api/runs/${run.id}`, { method: "DELETE" }).then(onRefresh).catch((error) => onNotice(message(error)))}>Delete</button></div></li>)}</ul> : <p className="muted">No runs yet.</p>}</div>{curl && <pre className="card curl">{curl}</pre>}</section>;
-}
-function Settings({ onRefresh, onNotice }: { onRefresh: () => Promise<void>; onNotice: (text: string) => void }) { const [confirming, setConfirming] = useState(false); async function clear() { try { await api("/api/settings/clear-history", { method: "POST" }); setConfirming(false); await onRefresh(); } catch (error) { onNotice(message(error)); } } return <section><h2>Settings</h2><div className="card stack"><h3>Local data</h3><p>Run history remains on this machine until you delete it. Profile keys are kept; this action does not contact providers.</p>{confirming ? <div className="row"><span>Delete all history?</span><button className="danger" onClick={() => void clear()}>Delete now</button><button onClick={() => setConfirming(false)}>Cancel</button></div> : <button className="danger" onClick={() => setConfirming(true)}>Clear history</button>}</div></section>; }
-function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><h3>{title}</h3><p>{text}</p></div>; }
-function RunView({ run }: { run: RunDto }) { return <div><p><b>{run.status}</b>{run.error ? ` — ${run.error.message}` : ""}</p>{run.assets.map((asset) => <Media asset={asset} key={asset.id} />)}<details><summary>Inspector (redacted)</summary><pre>{JSON.stringify(run.inspector, null, 2)}</pre></details></div>; }
-function Media({ asset }: { asset: AssetDto }) { return asset.mimeType.startsWith("video/") ? <video controls src={asset.url} /> : asset.mimeType.startsWith("image/") ? <img src={asset.url} alt="Generated or attached asset" /> : <a href={asset.url}>Download {asset.mimeType}</a>; }
-
-function Batches({ batches, profiles, models, selectedProfileId, selectedModelId, selectProfile, selectModel, onRefresh, onNotice }: { batches: BatchJobDto[]; profiles: ProfileDto[]; models: ModelDto[]; selectedProfileId: string; selectedModelId: string; selectProfile: (id: string) => Promise<void>; selectModel: (id: string) => void; onRefresh: () => Promise<void>; onNotice: (text: string) => void }) {
-  const [activeId, setActiveId] = useState<string>("");
-  const [active, setActive] = useState<BatchJobDto | null>(null);
-  const [draftName, setDraftName] = useState("");
-  const [draftProfileId, setDraftProfileId] = useState(selectedProfileId);
-  const [draftModelId, setDraftModelId] = useState(selectedModelId);
-  const [entryPrompt, setEntryPrompt] = useState("");
-  const [entryParams, setEntryParams] = useState<ParameterValues>({});
-  const [entryAssets, setEntryAssets] = useState<AssetDto[]>([]);
-  const [jsonl, setJsonl] = useState<string>("");
+/**
+ * One Server: its stored session, its typed client and its sign-in flow.
+ *
+ * The session is read from the device before the shell renders, written when a
+ * sign-in succeeds, and cleared when it ends or the Server rejects the token.
+ */
+function ServerApp({
+  deps,
+  origin,
+  developmentDefault,
+  problem,
+  onChangeServer,
+  onUseDefault,
+}: {
+  deps: AppDependencies;
+  origin: string;
+  developmentDefault: boolean;
+  problem: string | null;
+  onChangeServer: (origin: string) => void;
+  onUseDefault: () => void;
+}) {
+  const sessionProvider = useMemo(
+    () => createSessionProvider({ localStore: deps.localStore, serverOrigin: origin }),
+    [deps.localStore, origin],
+  );
+  /** undefined until the device's stored session has been read. */
+  const [session, setSession] = useState<SessionDto | null | undefined>(undefined);
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { setDraftProfileId(selectedProfileId); setDraftModelId(selectedModelId); }, [selectedProfileId, selectedModelId]);
-  useEffect(() => { if (!activeId && batches[0]) setActiveId(batches[0].id); }, [batches, activeId]);
-
-  const loadActive = useCallback(async (id: string) => {
-    if (!id) { setActive(null); return; }
-    try { setActive(await getBatch(id)); }
-    catch (error) { onNotice(message(error)); }
-  }, [onNotice]);
-
-  useEffect(() => { void loadActive(activeId); }, [activeId, loadActive]);
-
   useEffect(() => {
-    if (!active || !["submitting", "running"].includes(active.status)) return;
-    const timer = setInterval(() => { void loadActive(active.id).then(() => onRefresh()); }, 10_000);
-    return () => clearInterval(timer);
-  }, [active, loadActive, onRefresh]);
+    let active = true;
+    void sessionProvider
+      .restore()
+      .then((restored) => {
+        if (active) setSession(restored);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setNotice(`The stored session could not be read: ${describeError(error)}`);
+        setSession(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [sessionProvider]);
 
-  async function create() {
-    if (!draftProfileId || !draftModelId) { onNotice("Choose a connection and an adapted model first."); return; }
+  const api = useMemo(
+    () => new SolarisApi({ baseUrl: origin, getToken: () => session?.token ?? null }),
+    [origin, session],
+  );
+
+  const fail = useCallback(
+    (error: unknown) => {
+      // An expired or revoked session is not a page error: the device forgets a
+      // token the Server has already rejected and returns to sign-in.
+      if (isAuthRequired(error)) {
+        setSession(null);
+        setNotice("The Solaris session is no longer valid. Sign in again.");
+        void sessionProvider.persist(null).catch((thrown: unknown) => {
+          setNotice(`The session expired, and the stored token could not be cleared: ${describeError(thrown)}`);
+        });
+        return;
+      }
+      setNotice(describeError(error));
+    },
+    [sessionProvider],
+  );
+
+  async function signIn() {
     setBusy(true);
-    try { const job = await createBatch({ profileId: draftProfileId, modelId: draftModelId, displayName: draftName || undefined }); setDraftName(""); setActiveId(job.id); await onRefresh(); }
-    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+    setNotice("");
+    try {
+      const deployment = await api.getDeployment();
+      const { code, codeVerifier } = await deps.desktopLogin.authorize({
+        authorizationEndpoint: deployment.auth.authorizationEndpoint,
+      });
+      const next = await api.exchangeDesktopCode({ code, codeVerifier });
+      // The session counts as active only once the device has stored it.
+      await sessionProvider.persist(next);
+      setSession(next);
+    } catch (error) {
+      setNotice(`Sign-in failed: ${describeError(error)}`);
+    } finally {
+      setBusy(false);
+    }
   }
-  async function addEntry() {
-    if (!active || active.status !== "draft") return; if (!entryPrompt.trim()) return;
-    setBusy(true);
-    try { const updated = await addBatchEntry(active.id, { prompt: entryPrompt, parameters: entryParams, assetIds: entryAssets.map((asset) => asset.id) }); setActive(updated); setEntryPrompt(""); setEntryParams({}); setEntryAssets([]); await onRefresh(); }
-    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+
+  async function signOut() {
+    try {
+      await sessionProvider.persist(null);
+    } catch (error) {
+      setNotice(`Sign-out failed: ${describeError(error)} This device still holds the session.`);
+      return;
+    }
+    try {
+      await api.logout();
+    } catch {
+      // The token is already gone from this device; revoking it on the Server is
+      // best effort and the session expires on its own.
+    }
+    setNotice("");
+    setSession(null);
   }
-  async function preview() {
-    if (!active) return;
-    try { setJsonl(await previewBatchJsonl(active.id)); }
-    catch (error) { onNotice(message(error)); }
+
+  if (session === undefined) {
+    return (
+      <main className="signin">
+        <div className="card stack">
+          <Brand />
+          <h3>Restoring the session…</h3>
+          <p className="muted">Reading this device&apos;s stored session for {origin}.</p>
+        </div>
+      </main>
+    );
   }
-  async function submit() {
-    if (!active) return;
-    setBusy(true);
-    try { setActive(await submitBatch(active.id)); await onRefresh(); }
-    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
+
+  if (session === null) {
+    return (
+      <main className="signin">
+        <div className="card stack">
+          <Brand />
+          <h3>Sign in to this Server</h3>
+          <p>
+            Solaris opens the system browser for authorization, receives the code on a loopback listener in this app, and
+            exchanges it here for a Solaris session. No password is entered in this window, and a refused exchange leaves this
+            device signed out.
+          </p>
+          <p className="muted">Server {origin}</p>
+          <button className="primary" disabled={busy} onClick={() => void signIn()}>
+            {busy ? "Waiting for the browser…" : "Sign in"}
+          </button>
+          {notice !== "" && <Notice text={notice} onDismiss={() => setNotice("")} />}
+          {developmentDefault && <DefaultAddressNote origin={origin} />}
+          <details>
+            <summary>Server address</summary>
+            <ServerAddress
+              settings={deps.settings}
+              current={origin}
+              defaultOrigin={deps.defaultServerOrigin}
+              problem={problem}
+              onSaved={onChangeServer}
+              onUseDefault={onUseDefault}
+            />
+          </details>
+        </div>
+      </main>
+    );
   }
-  async function cancel() {
-    if (!active) return;
-    setBusy(true);
-    try { setActive(await cancelBatch(active.id)); await onRefresh(); }
-    catch (error) { onNotice(message(error)); } finally { setBusy(false); }
-  }
-  async function removeBatch(id: string) {
-    try { await deleteBatch(id); if (activeId === id) { setActiveId(""); setActive(null); } await onRefresh(); }
-    catch (error) { onNotice(message(error)); }
-  }
-  async function removeEntry(entryId: string) {
-    if (!active) return;
-    try { setActive(await getBatch(active.id)); await deleteBatchEntry(active.id, entryId); setActive(await getBatch(active.id)); await onRefresh(); }
-    catch (error) { onNotice(message(error)); }
-  }
-  const draftModel = models.find((model) => model.id === draftModelId);
-  const draftConfig = draftModel?.operationConfigs.imageGenerate;
-  const live = !!active && (active.status === "running" || active.status === "submitting");
-  const progress = active && active.totalCount ? Math.round(((active.succeededCount + active.failedCount) / active.totalCount) * 100) : 0;
-  return <section><div className="title-row"><h2>Batch calls</h2>{active && live && <span className="batch-status live">Live · {batchStatusLabels[active.status]}</span>}</div>
-    {!profiles.length ? <Empty title="No connections yet" text="Create a named connection before building a batch." /> : <>
-      <div className="card stack"><h3>Start a batch</h3><div className="selectors"><label>Connection<select value={draftProfileId} onChange={(event) => { setDraftProfileId(event.target.value); void selectProfile(event.target.value); }}>{profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.pluginId}</option>)}</select></label><label>Model<select value={draftModelId} onChange={(event) => { setDraftModelId(event.target.value); selectModel(event.target.value); }}><option value="" disabled>Select an adapted model</option>{models.filter((model) => model.enabled).map((model) => <option value={model.id} disabled={!model.adapted} key={model.id}>{model.label}{model.adapted ? "" : " — Not adapted"}</option>)}</select></label><label>Display name<input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="My batch run" /></label></div><p className="muted">Each new request becomes one JSONL line. The whole batch is submitted as a single inline Gemini Batch API call (50% price, ≤24h).</p><button className="primary" disabled={busy || !draftProfileId || !draftModelId} onClick={() => void create()}>Create draft</button></div>
-      {batches.length > 0 && <div className="card stack"><h3>Recent batches</h3><ul className="batch-list">{batches.map((job) => <li key={job.id} className={job.id === activeId ? "active" : ""}><button type="button" className="batch-link" onClick={() => setActiveId(job.id)}><b>{job.displayName}</b><small>{job.providerModelId} · {batchStatusLabels[job.status]} · {job.succeededCount}/{job.totalCount} ok</small></button><button type="button" aria-label={`Delete batch ${job.displayName}`} onClick={() => void removeBatch(job.id)}>×</button></li>)}</ul></div>}
-      {active && <div className="card stack">
-        <div className="title-row"><h3>{active.displayName}</h3><span className={`batch-status ${active.status}`}>{batchStatusLabels[active.status]}</span></div>
-        <p className="muted">{active.entries.length} request{active.entries.length === 1 ? "" : "s"} · succeeded {active.succeededCount} · failed {active.failedCount}{active.remoteId ? ` · remote ${active.remoteId}` : ""}</p>
-        {live && <div className="batch-progress" aria-label="Batch progress"><span style={{ width: `${progress}%` }} /><small>{progress}% processed</small></div>}
-        {active.error && <div className="model-warning" role="status"><b>Batch error</b><span>{active.error.message}</span></div>}
-        {active.status === "draft" && <>
-          <div className="batch-entry-form"><label className="prompt-label">Add a request to this batch</label><textarea value={entryPrompt} onChange={(event) => setEntryPrompt(event.target.value)} placeholder="Describe the image you want…" rows={5} />{draftConfig?.attachments && <AssetPicker assets={entryAssets} contextAssets={[]} policy={draftConfig.attachments} onChange={setEntryAssets} onNotice={onNotice} disabled={busy} />}{draftConfig?.parameters && <ParameterPanel definitions={draftConfig.parameters} values={entryParams} onChange={(key, value) => setEntryParams((current) => ({ ...current, [key]: value }))} />}<div className="row"><span className="spacer" /><button type="button" className="primary" disabled={busy || !entryPrompt.trim()} onClick={() => void addEntry()}>Add request</button></div></div>
-          {active.entries.length > 0 && <ul className="batch-entry-list">{active.entries.map((entry) => <li key={entry.id}><div><b>#{entry.index + 1}</b><span>{entry.prompt.length > 180 ? `${entry.prompt.slice(0, 180)}…` : entry.prompt}</span><small>{entry.assetIds.length} reference{entry.assetIds.length === 1 ? "" : "s"}</small></div><button type="button" aria-label={`Remove entry ${entry.index + 1}`} onClick={() => void removeEntry(entry.id)}>×</button></li>)}</ul>}
-          <div className="batch-actions"><button type="button" disabled={busy || active.entries.length === 0} onClick={() => void preview()}>Preview JSONL</button><button type="button" className="primary" disabled={busy || active.entries.length === 0} onClick={() => void submit()}>Submit batch</button></div>
-          {jsonl && <pre className="card batch-jsonl">{jsonl}</pre>}
-        </>}
-        {(active.status === "succeeded" || active.status === "failed" || active.status === "cancelled" || active.status === "expired") && <ul className="batch-entry-list">{active.entries.map((entry) => <li key={entry.id} className={entry.status}><div><b>#{entry.index + 1}</b><span>{entry.prompt.length > 180 ? `${entry.prompt.slice(0, 180)}…` : entry.prompt}</span><small>status: {entry.status}{entry.error ? ` — ${entry.error.message}` : ""}</small></div>{entry.runId && <a href={`/api/runs/${entry.runId}`}>Open run</a>}</li>)}</ul>}
-        {live && <div className="batch-actions"><button type="button" className="danger" onClick={() => void cancel()}>Cancel batch</button></div>}
-      </div>}
-    </>}</section>;
+
+  return (
+    <Shell
+      api={api}
+      deps={deps}
+      origin={origin}
+      developmentDefault={developmentDefault}
+      problem={problem}
+      fail={fail}
+      notice={notice}
+      onNotice={setNotice}
+      onSignOut={() => void signOut()}
+      onChangeServer={onChangeServer}
+      onUseDefault={onUseDefault}
+      session={session}
+    />
+  );
+}
+
+function Shell({
+  api,
+  deps,
+  origin,
+  developmentDefault,
+  problem,
+  fail,
+  notice,
+  onNotice,
+  onSignOut,
+  onChangeServer,
+  onUseDefault,
+  session,
+}: {
+  api: SolarisApi;
+  deps: AppDependencies;
+  origin: string;
+  developmentDefault: boolean;
+  problem: string | null;
+  fail: (error: unknown) => void;
+  notice: string;
+  onNotice: (text: string) => void;
+  onSignOut: () => void;
+  onChangeServer: (origin: string) => void;
+  onUseDefault: () => void;
+  session: SessionDto;
+}) {
+  const [page, setPage] = useState<Page>("workspace");
+  const [showServer, setShowServer] = useState(false);
+  const notify = useCallback((text: string) => onNotice(text), [onNotice]);
+  const catalog = useConnectionCatalog(api, fail);
+
+  const services = useMemo<Services>(
+    () => ({
+      api,
+      localStore: deps.localStore,
+      scope: { serverOrigin: api.origin, userId: session.user.id },
+      notify,
+      fail,
+    }),
+    [api, deps.localStore, fail, notify, session.user.id],
+  );
+
+  const usableModels = catalog.models.filter((model) => model.enabled && model.adapted).length;
+  const current = navigation.find((item) => item.id === page);
+
+  return (
+    <ServicesContext.Provider value={services}>
+      <main className="shell">
+        <aside className="sidebar">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              <i />
+            </span>
+            <div>
+              <h1>Solaris</h1>
+              <p>Single-image workspace</p>
+            </div>
+          </div>
+          <nav aria-label="Primary navigation">
+            {navigation.map((item) => (
+              <button
+                className={page === item.id ? "active" : ""}
+                aria-current={page === item.id ? "page" : undefined}
+                onClick={() => setPage(item.id)}
+                key={item.id}
+              >
+                <span>{item.index}</span>
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <div className="solar-rail" aria-hidden="true">
+            <span className="solar-orb" />
+          </div>
+          <div className="local-state">
+            <span className="pulse" />
+            <div>
+              <b>{session.user.displayName ?? session.user.id}</b>
+              <small>{origin}</small>
+            </div>
+          </div>
+        </aside>
+        <div className="workspace">
+          <header className="topbar">
+            <div>
+              <span className="eyebrow">{current?.index} / SOLARIS</span>
+              <p>
+                {catalog.connections.length} connection{catalog.connections.length === 1 ? "" : "s"} · {usableModels} usable
+                model{usableModels === 1 ? "" : "s"}
+              </p>
+            </div>
+            <div className="row">
+              <span className="local">
+                <i />
+                Signed in
+              </span>
+              <button type="button" onClick={() => setShowServer((open) => !open)}>
+                Server
+              </button>
+              <button type="button" onClick={onSignOut}>
+                Sign out
+              </button>
+            </div>
+          </header>
+          {developmentDefault && <DefaultAddressNote origin={origin} />}
+          {notice !== "" && <Notice text={notice} onDismiss={() => onNotice("")} />}
+          {showServer && (
+            <div className="card stack panel-block">
+              <h3>Server address</h3>
+              <ServerAddress
+                settings={deps.settings}
+                current={origin}
+                defaultOrigin={deps.defaultServerOrigin}
+                problem={problem}
+                onSaved={(next) => {
+                  setShowServer(false);
+                  onChangeServer(next);
+                }}
+                onUseDefault={() => {
+                  setShowServer(false);
+                  onUseDefault();
+                }}
+              />
+            </div>
+          )}
+          <div className="page-stage">
+            {page === "workspace" && <Workspace catalog={catalog} />}
+            {page === "connections" && <Connections catalog={catalog} />}
+            {page === "history" && <History />}
+          </div>
+        </div>
+      </main>
+    </ServicesContext.Provider>
+  );
+}
+
+function Brand() {
+  return (
+    <div className="brand brand-plain">
+      <span className="brand-mark" aria-hidden="true">
+        <i />
+      </span>
+      <div>
+        <h1>Solaris</h1>
+        <p>Single-image workspace</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The address in use was not configured; it is the address that served this page.
+ * A packaged desktop build has no such default and never shows this.
+ */
+function DefaultAddressNote({ origin }: { origin: string }) {
+  return (
+    <p className="default-address" role="status">
+      Development default: no Server address is stored on this device, so this build uses <b>{origin}</b>, the address that
+      served this page. Set the Server address to keep it explicit.
+    </p>
+  );
+}
+
+function Notice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
+  return (
+    <div className="notice" role="status">
+      <span>{text}</span>
+      <button aria-label="Dismiss notice" onClick={onDismiss}>
+        ×
+      </button>
+    </div>
+  );
 }

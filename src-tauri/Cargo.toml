@@ -1,0 +1,38 @@
+[package]
+name = "solaris-desktop"
+version = "0.1.0"
+description = "Solaris desktop shell (Tauri v2). Business logic stays in TypeScript; this crate carries only capabilities that need the OS."
+edition = "2021"
+rust-version = "1.77"
+publish = false
+
+[lib]
+name = "solaris_desktop_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+rfd = "0.15"
+
+# The secure store is chosen per platform on purpose. `keyring` falls back to an
+# in-memory mock when no native store feature is enabled, which would look like a
+# working Keychain while losing every token on restart. There is deliberately no
+# un-featured entry: a platform with no native store fails to compile instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

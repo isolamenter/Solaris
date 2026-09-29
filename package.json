@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20.19" },
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev": "npm run build && NODE_ENV=production tsx src/server/main.ts",
     "build": "vite build",
@@ -18,9 +20,10 @@
   "dependencies": {
     "@fastify/multipart": "^9.3.0",
     "@fastify/static": "^8.3.0",
+    "@tauri-apps/api": "^2.12.0",
     "better-sqlite3": "^12.4.1",
-    "drizzle-orm": "^0.44.5",
     "fastify": "^5.5.0",
+    "jose": "^6.2.12",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zod": "^4.1.8"
@@ -28,6 +31,7 @@
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@playwright/test": "^1.55.0",
+    "@tauri-apps/cli": "^2.12.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.19.0",
     "@types/react": "^19.1.13",

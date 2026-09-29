@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { adaptGeminiModels, adaptGeminiOutput, geminiImageRequest, geminiModelAvailability, geminiModelOperationConfig } from "./geminiAdapter.js";
 
 describe("Gemini adapter", () => {
-  it("recognizes gateway preview aliases while keeping unknown image models visible", () => {
+  it("filters candidates by image name and drops everything else, including video", () => {
+    // A gateway returns no capability metadata at all, so discovery only narrows
+    // candidates by name. `adapted` (see geminiModelAvailability) is what
+    // actually authorizes a run — a candidate capability is not a guarantee.
     expect(adaptGeminiModels([
       { name: "models/gemini-2.5-flash" },
       { name: "models/gemini-3.1-flash-image-preview" },
@@ -10,9 +13,17 @@ describe("Gemini adapter", () => {
       { name: "models/veo-3.1-generate-preview" },
     ])).toEqual([
       { providerModelId: "gemini-3.1-flash-image-preview", label: undefined, capabilities: ["imageGenerate"] },
-      { providerModelId: "gemini-2.5-flash-image", label: undefined, capabilities: [] },
-      { providerModelId: "veo-3.1-generate-preview", label: undefined, capabilities: ["videoGenerate"] },
+      { providerModelId: "gemini-2.5-flash-image", label: undefined, capabilities: ["imageGenerate"] },
     ]);
+    // Video is out of scope entirely (D5): it is not even a candidate.
+    expect(adaptGeminiModels([{ name: "models/veo-3.1-generate-preview" }])).toEqual([]);
+  });
+
+  it("treats a candidate as unusable until the allowlist adapts it", () => {
+    const [candidate] = adaptGeminiModels([{ name: "models/gemini-2.5-flash-image" }]);
+    expect(candidate?.capabilities).toEqual(["imageGenerate"]);
+    expect(geminiModelAvailability("gemini-2.5-flash-image")).toMatchObject({ adapted: false });
+    expect(geminiModelOperationConfig("gemini-2.5-flash-image", "imageGenerate")).toBeUndefined();
   });
 
   it("excludes native chat-only models", () => {
@@ -28,6 +39,29 @@ describe("Gemini adapter", () => {
     const output = adaptGeminiOutput({ candidates: [{ content: { parts: [{ text: "done" }, { inlineData: { mimeType: "image/webp", data: "aW1hZ2U=" } }] } }] });
     expect(output.text).toBe("done");
     expect(output.assets).toEqual([{ bytes: Buffer.from("image"), mimeType: "image/webp" }]);
+  });
+
+  it("keeps only inline, decodable, image-typed parts as usable assets", () => {
+    const parts = [
+      { text: "here you go" },
+      // A result delivered by URL is not a request target Solaris will fetch.
+      { uri: "https://elsewhere.example/result.png" },
+      { inlineData: { mimeType: "text/html", data: "aW1hZ2U=" } },
+      { inlineData: { mimeType: "image/png", data: "!!!" } },
+      { inlineData: { data: "aW1hZ2U=" } },
+      { inlineData: { mimeType: "IMAGE/PNG", data: "aW1hZ2U=" } },
+    ];
+    const output = adaptGeminiOutput({ candidates: [{ content: { parts } }] });
+    expect(output.assets).toEqual([{ bytes: Buffer.from("image"), mimeType: "image/png" }]);
+    expect(adaptGeminiOutput({ candidates: [{ content: { parts: parts.slice(0, 4) } }] }).assets).toEqual([]);
+    expect(adaptGeminiOutput({}).assets).toEqual([]);
+  });
+
+  it("ignores fields it does not consume when discovery returns unvalidated JSON", () => {
+    expect(adaptGeminiModels([
+      { name: 42 as unknown as string },
+      { name: "models/gemini-3.1-flash-image", displayName: 7 as unknown as string },
+    ])).toEqual([{ providerModelId: "gemini-3.1-flash-image", label: undefined, capabilities: ["imageGenerate"] }]);
   });
 
   it("keeps legacy image models on their original generation config", () => {
