@@ -10,4 +10,3 @@ npm-debug.log*
 /dist
 /playwright-report
 /test-results
-.docs
